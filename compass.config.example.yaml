@@ -39,6 +39,7 @@ validators:
 versioning:
   manifest: arc-manifest.yaml
   release_title_format: "{repo} v{version} — {description}"
+  # deploy_command: "arc upgrade {repo}"   # optional
 
 # Optional: project-specific extensions to compass-core workflows.
 # compass-core treats this block as opaque — the consumer owns its shape.
@@ -48,3 +49,12 @@ versioning:
 #     steps:
 #       - "Apply SAML SSO settings"
 #       - "Add to internal CODEOWNERS map"
+#   registry:
+#     repo: my-org/registry-repo
+#     file: REGISTRY.yaml
+#     update_command: |
+#       cd ../registry-repo
+#       # update REGISTRY.yaml entry for {{repo_name}} to {{new_version}}
+#       git add REGISTRY.yaml
+#       git commit -m "chore: bump {{repo_name}} to v{{new_version}}"
+#       git push origin main

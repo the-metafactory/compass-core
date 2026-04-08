@@ -59,3 +59,37 @@ CLAUDE.md:3                via [arc](https://github.com/the-metafactory/arc)    
 ```
 
 **Verdict:** PASS. All hits are factual package-metadata references to the parent org. Zero internal leaks.
+
+---
+
+## v0.2.0 — 2026-04-08 — Phase B (de-metafactorization)
+
+**Scope of edits:**
+- `sops/dev-pipeline.md` — placeholder replaced with full generic content (parameterized via `features.branch_pattern`, `features.commit_prefix`, `org.default_branch`)
+- `sops/versioning.md` — placeholder replaced; registry sync moved to `extensions.registry`; `versioning.deploy_command` added as optional field
+- `sops/new-repo-pattern.md` — placeholder replaced with the seven generic bootstrap steps; project-specific infrastructure (chat, deploys, dashboards) routed through `extensions.new_repo`
+- `claude/skills/governance/workflows/version-bump.md` — Phase A1 placeholder note removed; `extensions.registry` reference added
+- `claude/skills/governance/workflows/new-repo.md` — Phase A1 placeholder note removed
+- `claude/skills/governance/workflows/sop-lookup.md` — placeholder failure-mode replaced with generic missing-file handling
+- `claude/skills/governance/config-schema.md` — placeholders standardized to dotted notation; `extensions.registry` documented; `versioning.deploy_command` documented
+- `compass.config.example.yaml` — `extensions.registry` and `deploy_command` examples added
+
+**Audit pattern 1** — broad forbidden terms:
+
+```
+(only previously-allowed factual package-metadata references remain — same set as v0.1.0)
+```
+
+**Audit pattern 2** — specific internal references:
+
+```
+(no matches outside leak-audit.md itself)
+```
+
+**Audit pattern 3** — internal SOPs / infra terminology:
+
+```
+(no matches; "on-call rotations" example in new-repo-pattern.md was rephrased to "paging schedules" to avoid the on-call false positive)
+```
+
+**Verdict:** PASS. The de-metafactorized SOPs introduce zero new internal references. All metafactory-specific content (Cloudflare bindings, grove bot, discord channels, REGISTRY.yaml in meta-factory repo, the SOP-7 incident framing, etc.) is correctly routed to consumer overlay extensions (`extensions.new_repo`, `extensions.registry`) instead of being baked into compass-core.
