@@ -42,10 +42,10 @@ compass-core is parameterized via `compass.config.yaml` in the consuming repo. S
 
 | Placeholder | Purpose |
 |------------|---------|
-| `{{config:org_name}}` | Git host org slug |
-| `{{config:org_display_name}}` | Brand / display name |
-| `{{config:default_branch}}` | Default branch (usually `main`) |
-| `{{config:default_license}}` | License identifier (MIT, Apache-2.0, etc.) |
+| `{{config:org.name}}` | Git host org slug |
+| `{{config:org.display_name}}` | Brand / display name |
+| `{{config:org.default_branch}}` | Default branch (usually `main`) |
+| `{{config:org.default_license}}` | License identifier (MIT, Apache-2.0, etc.) |
 | `{{config:features.id_prefix}}` | Feature ID prefix (`F-`, `P-`, etc.) |
 | `{{config:features.branch_pattern}}` | Branch naming pattern |
 | `{{config:features.worktree_pattern}}` | Worktree directory pattern |
