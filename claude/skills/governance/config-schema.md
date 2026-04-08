@@ -210,3 +210,11 @@ If you see a `{{template:...}}` placeholder in a compass-core file that isn't in
 ## Defaults
 
 When a key is marked "default" in this doc, the resolver substitutes the listed default value if the consumer's config omits the key. Required keys with no default cause the workflow to refuse and surface the missing-key error.
+
+---
+
+## Validation
+
+`loadConfig()` (in `engine/lib/config.ts`) parses the YAML and then runs it through a Zod schema (`CompassConfigSchema`) that enforces the types documented above — including **element-level** checks on list fields like `labels.required.types`, `labels.required.priorities`, and `validators.claude_md.required_sections`. An unquoted `true` in a `priorities:` list, a stray number in `types:`, or a string passed where a boolean is expected all surface as a load-time error pointing at the offending field path (e.g., `labels.required.types.1: Expected string, received number`) rather than crashing a downstream validator with a cryptic traceback.
+
+The schema uses `passthrough()` at the top level, so an unknown top-level key is preserved in the returned object instead of being stripped. This keeps compass-core forward-compatible with consumer repos that add their own extensions without having to declare every new section in the schema.
