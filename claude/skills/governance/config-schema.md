@@ -79,21 +79,35 @@ The format of `labels.source` is defined in `standards/labels.schema.yaml`.
 ```yaml
 validators:
   claude_md:
-    enabled: true
-    required_sections:
+    enabled: true                  # default: true
+    required_sections:             # default: ["Critical Rules", "Standard Operating Procedures"]
       - Architecture
       - Critical Rules
+      - Standard Operating Procedures
   label_check:
-    enabled: true
-    enforce_required: true
+    enabled: true                  # default: true
+    enforce_required: true         # default: true
 ```
 
 | Key | Used by | Purpose |
 |-----|---------|---------|
-| `validators.claude_md.enabled` | `validator-run` | Toggle the CLAUDE.md validator. |
-| `validators.claude_md.required_sections` | `claude-md-check.ts` | Section headings the validator enforces. Phase C parameterization. |
-| `validators.label_check.enabled` | `validator-run` | Toggle the label validator. |
-| `validators.label_check.enforce_required` | `label-check.ts` | If true, open issues without a required type/priority label fail. |
+| `validators.claude_md.enabled` | `claude-md-check.ts`, `run-all.ts` | Toggle the CLAUDE.md validator. If `false`, the check skips with exit code 0. |
+| `validators.claude_md.required_sections` | `claude-md-check.ts` | List of `## ` section headings every CLAUDE.md must contain. Match is case-insensitive on the heading text. If absent, the validator falls back to `["Critical Rules", "Standard Operating Procedures"]`. |
+| `validators.label_check.enabled` | `label-check.ts`, `run-all.ts` | Toggle the label validator. If `false`, the check skips with exit code 0. |
+| `validators.label_check.enforce_required` | `label-check.ts` | If `true` (default), missing required labels fail the check. If `false`, the check reports missing labels but exits 0 (warning mode). |
+
+The label validator's *required label set* is the union of `labels.required.types` and `labels.required.priorities` (see the `labels` section above). If `labels.required` is absent the validator falls back to `["bug", "documentation", "feature", "infrastructure"]` for types and `["now", "next", "future"]` for priorities.
+
+### Where the validators look for `compass.config.yaml`
+
+Both validators use a shared loader at `engine/lib/config.ts`. The loader resolves the config path in this priority order:
+
+1. The `COMPASS_CONFIG` environment variable (absolute or cwd-relative path)
+2. The `--config <path>` flag passed to the validator
+3. `compass.config.yaml` in the current working directory
+4. (claude-md-check only) `compass.config.yaml` walked up from the directory of the CLAUDE.md being checked
+
+If no config file is found, both validators fall back to the documented defaults so they remain useful out-of-the-box on a freshly bootstrapped repo.
 
 ---
 
