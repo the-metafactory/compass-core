@@ -1,0 +1,19 @@
+{
+  "name": "@the-metafactory/compass-core",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Reusable governance engine for Claude Code projects — SOPs, validators, governance skill + subagent, CLAUDE.md template",
+  "scripts": {
+    "test": "bun test",
+    "validate:claude-md": "bun engine/validators/claude-md-check.ts",
+    "validate:labels": "bun engine/validators/label-check.ts",
+    "validate:all": "bun engine/ci/run-all.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
