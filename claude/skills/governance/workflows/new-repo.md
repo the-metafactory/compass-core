@@ -18,8 +18,10 @@ SOP: new-repo-pattern | Repo: {org.name}/{repo-name} | Steps: {N}/{M} applicable
 
 4. **Create the repo** with `gh repo create {org.name}/{repo-name} --{visibility} --license {license} --clone`.
 5. **Apply the standard label set** by invoking the `label-sync` workflow against the new repo.
-6. **Bootstrap CLAUDE.md** by copying `templates/CLAUDE.md.template` and substituting all `{{config:...}}` placeholders.
-7. **Bootstrap arc-manifest.yaml** by copying `templates/arc-manifest.template.yaml`.
+6. **Bootstrap CLAUDE.md** by copying `templates/CLAUDE.md.template` and substituting:
+   - `{{config:...}}` placeholders from `compass.config.yaml`
+   - `{{template:...}}` placeholders from the template-instantiation context (the new repo's name, description, author, etc. — see `config-schema.md` → "Template inputs")
+7. **Bootstrap arc-manifest.yaml** by copying `templates/arc-manifest.template.yaml` and substituting the same two placeholder namespaces.
 8. **Run the project-specific extension** if `extensions.new_repo` is configured:
    - `extensions.new_repo.script` — a path to a shell script the consumer wrote
    - `extensions.new_repo.steps` — a list of additional manual steps the consumer wants the agent to walk through
