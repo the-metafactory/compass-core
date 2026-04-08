@@ -148,3 +148,97 @@ extensions:
     expect(ext.registry?.repo).toBe("my-org/registry");
   });
 });
+
+describe("schema validation", () => {
+  test("rejects non-string element in labels.required.types", () => {
+    // 42 is a number — schema should reject with a path pointing at index 1.
+    const yaml = `
+schema: compass-config/v1
+labels:
+  required:
+    types:
+      - bug
+      - 42
+      - feature
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    expect(() => loadConfig()).toThrow(/labels\.required\.types\.1/);
+  });
+
+  test("rejects non-string element in labels.required.priorities", () => {
+    // An unquoted `true` parses as a boolean in YAML 1.2 — schema rejects it.
+    const yaml = `
+schema: compass-config/v1
+labels:
+  required:
+    priorities:
+      - now
+      - true
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    expect(() => loadConfig()).toThrow(/labels\.required\.priorities\.1/);
+  });
+
+  test("rejects non-string element in validators.claude_md.required_sections", () => {
+    const yaml = `
+schema: compass-config/v1
+validators:
+  claude_md:
+    required_sections:
+      - Architecture
+      - null
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    expect(() => loadConfig()).toThrow(/validators\.claude_md\.required_sections\.1/);
+  });
+
+  test("rejects wrong type on a scalar field (validators.label_check.enabled)", () => {
+    // String "true" is not a boolean.
+    const yaml = `
+schema: compass-config/v1
+validators:
+  label_check:
+    enabled: "true"
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    expect(() => loadConfig()).toThrow(/validators\.label_check\.enabled/);
+  });
+
+  test("accepts a config with unknown top-level keys (forward-compat)", () => {
+    // passthrough() preserves unknown keys so downstream code keeps working
+    // across compass-core versions that add new sections.
+    const yaml = `
+schema: compass-config/v1
+future_section:
+  key: value
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    expect(() => loadConfig()).not.toThrow();
+    const cfg = loadConfig();
+    expect((cfg as any)?.future_section?.key).toBe("value");
+  });
+
+  test("error message includes the file path and field path", () => {
+    const yaml = `
+labels:
+  required:
+    types:
+      - 1
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    try {
+      loadConfig();
+      throw new Error("expected loadConfig to throw");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toContain("compass.config.yaml");
+      expect(msg).toContain("labels.required.types.0");
+    }
+  });
+});
