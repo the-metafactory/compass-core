@@ -2,9 +2,7 @@
 
 **Trigger:** "new repo", "bootstrap repo", "create repo in {project}", "initialize project"
 
-**Purpose:** Walk the new-repo-pattern SOP, fill in project-specific steps from config.
-
-> **Phase A1 note:** `sops/new-repo-pattern.md` is a placeholder until Phase B. Until then, this workflow runs the generic skeleton below; consumer projects should write their own infrastructure-specific extension and reference it from `compass.config.yaml`'s `extensions.new_repo`.
+**Purpose:** Walk the new-repo-pattern SOP (`sops/new-repo-pattern.md`), fill in project-specific steps from `compass.config.yaml`.
 
 ---
 
