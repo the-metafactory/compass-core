@@ -1,0 +1,45 @@
+# required-sections.schema.yaml
+#
+# The shape of validators.claude_md.required_sections in compass.config.yaml.
+# Defines which CLAUDE.md headings the claude-md-check validator enforces.
+
+schema: compass-required-sections-schema/v1
+
+definition:
+  type: array
+  items:
+    oneOf:
+      - type: string
+        description: "Simple form: just the heading text. Matches '## {text}' at any nesting level >= 2."
+      - type: object
+        required: [name]
+        properties:
+          name:
+            type: string
+            description: "Heading text to match."
+          level:
+            type: integer
+            minimum: 1
+            maximum: 6
+            description: "Optional. Restrict matching to a specific heading level."
+          required_subsections:
+            type: array
+            items:
+              type: string
+            description: "Optional. Subsection headings that must appear under this section."
+          min_words:
+            type: integer
+            minimum: 0
+            description: "Optional. Minimum word count for the section's body. Catches stub sections."
+
+# Example:
+#
+# validators:
+#   claude_md:
+#     required_sections:
+#       - Architecture
+#       - name: Critical Rules
+#         level: 2
+#         min_words: 30
+#       - name: Standard Operating Procedures
+#         required_subsections: ["Activate when", "File"]

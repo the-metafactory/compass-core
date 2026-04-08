@@ -1,0 +1,24 @@
+# arc-manifest.yaml -- arc package manifest
+# Generic template shipped by compass-core. Substitute via compass.config.yaml.
+
+name: "{{config:package_name}}"               # Package name (matches repo name by default)
+version: "0.1.0"                              # Semantic version (bumped on each release)
+description: "{{config:repo_description}}"    # One-line description
+author:
+  name: "{{config:author_name}}"
+  github: "{{config:author_github}}"
+repository: "{{config:org_name}}/{{config:repo_name}}"
+license: "{{config:default_license}}"
+
+# Installation hooks (optional)
+# postinstall: "./scripts/postinstall.sh"
+
+# Binary entries (optional -- creates ~/bin/{name} symlinks)
+# bin:
+#   - name: "{cli_name}"
+#     path: "./dist/{cli_name}"
+
+# Dependencies (optional)
+# dependencies:
+#   - name: "another-package"
+#     version: ">=0.1.0"

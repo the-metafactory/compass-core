@@ -1,0 +1,50 @@
+# compass.config.yaml — example consumer config for compass-core
+#
+# Copy this file to your project's repo root as compass.config.yaml and fill in
+# project-specific values. compass-core's governance skill, validators, templates,
+# and SOPs all read from this file.
+#
+# See claude/skills/governance/config-schema.md for the full reference.
+
+schema: compass-config/v1
+
+org:
+  name: acme-corp
+  display_name: Acme
+  default_license: MIT
+  default_branch: main
+
+features:
+  id_prefix: F-
+  branch_pattern: "feat/{id}-{slug}"
+  worktree_pattern: "../{repo}-{slug}"
+  commit_prefix: feat
+
+labels:
+  source: standards/labels.yaml
+  required:
+    types: [bug, feature, infrastructure, documentation]
+    priorities: [now, next, future]
+
+validators:
+  claude_md:
+    enabled: true
+    required_sections:
+      - Critical Rules
+      - Standard Operating Procedures
+  label_check:
+    enabled: true
+    enforce_required: true
+
+versioning:
+  manifest: arc-manifest.yaml
+  release_title_format: "{repo} v{version} — {description}"
+
+# Optional: project-specific extensions to compass-core workflows.
+# compass-core treats this block as opaque — the consumer owns its shape.
+# extensions:
+#   new_repo:
+#     script: scripts/extra-bootstrap.sh
+#     steps:
+#       - "Apply SAML SSO settings"
+#       - "Add to internal CODEOWNERS map"
