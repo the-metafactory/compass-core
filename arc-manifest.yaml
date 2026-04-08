@@ -1,0 +1,51 @@
+name: "@the-metafactory/compass-core"
+version: 0.1.0
+type: governance
+description: "Reusable governance engine for Claude Code projects — SOPs, validators, governance skill + subagent, CLAUDE.md template"
+author:
+  name: the-metafactory
+  github: the-metafactory
+repository: the-metafactory/compass-core
+license: MIT
+
+provides:
+  skill:
+    - name: Governance
+      path: claude/skills/governance
+      install: ~/.claude/skills/Governance
+  agent:
+    - name: governance
+      path: claude/agents/governance.md
+      install: ~/.claude/agents/governance.md
+  templates:
+    - source: templates/CLAUDE.md.template
+      target: CLAUDE.md
+      config: compass.config.yaml
+    - source: templates/arc-manifest.template.yaml
+      target: arc-manifest.yaml
+      config: compass.config.yaml
+  validators:
+    - engine/validators/claude-md-check.ts
+    - engine/validators/label-check.ts
+  ci:
+    - engine/ci/run-all.ts
+
+requires:
+  config: compass.config.yaml
+
+capabilities:
+  filesystem:
+    read:
+      - "~/.claude/"
+      - "~/Developer/"
+  bash:
+    allowed: true
+    restricted_to:
+      - "gh label *"
+      - "gh api *"
+      - "gh issue *"
+      - "gh pr *"
+      - "gh repo *"
+      - "gh release *"
+      - "git *"
+      - "bun *"

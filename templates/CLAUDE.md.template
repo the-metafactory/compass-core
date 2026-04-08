@@ -1,0 +1,111 @@
+<!-- Generated from compass-core CLAUDE.md template. Customize sections marked with {{config:...}} via compass.config.yaml. -->
+
+# {{config:repo_name}} -- {{config:repo_description}}
+
+{{config:repo_description}}
+
+<!-- inject:after:description -->
+
+## Critical Rules
+
+- NEVER describe code you haven't read. Use Read/Glob/Grep to verify before making claims.
+- NEVER fabricate file names, class names, or architecture. If unsure, read the source.
+- Fix ALL errors found during type checks, tests, or linting -- even if pre-existing or introduced by another developer. Never dismiss errors as "not from our changes." If you see it, fix it.
+- Before fixing a bug or implementing a feature, ALWAYS check open PRs (`gh pr list`) and issues (`gh issue list`) first. Someone may already be working on it, or there may be a PR ready to merge that addresses it. Don't duplicate work -- review what exists before racing to write code.
+
+<!-- inject:after:critical-rules -->
+
+## GitHub Labels
+
+This repo uses the standard label set defined in `{{config:labels.source}}`. Do not create ad-hoc labels.
+
+Every issue must have at least one type label ({{config:labels.required.types}}) and one priority label ({{config:labels.required.priorities}}) if open.
+
+To sync labels:
+
+```bash
+bun standards/scripts/sync-labels.ts {{config:org_name}}/{{config:repo_name}}
+```
+
+## GitHub Issue Tracking
+
+When working on a GitHub issue in this repo, keep the issue updated as you work. This is default agent behavior, not optional.
+
+**On starting work:**
+- Comment on the issue: what you're working on, which sub-task
+- Example: `gh issue comment 1 --body "Starting: implement initial project structure"`
+
+**During work:**
+- When a sub-task checkbox is completed, tick it on the issue
+- When you create a PR, link it to the issue (use `closes #N` or `gh pr create` with issue reference)
+
+**On completing work:**
+- Comment with a summary: what was done, what changed, any follow-up needed
+- Tick completed checkboxes on both the GitHub issue AND any iteration plans
+- If all checkboxes are done, close the issue
+
+**Why:** GitHub is the shared collaboration surface. Team members and agents all read it. If you do work but don't update the issue, it looks like nothing happened.
+
+## Standard Operating Procedures
+
+This repo follows compass-core SOPs. **Before starting work, identify which SOPs apply and Read them. Output the pre-flight line from each loaded SOP.**
+
+| SOP | Activate when | File |
+|-----|--------------|------|
+| **Design process** | Creating specs, design docs, or research docs | `{{config:sops_path}}/design-process.md` |
+| **Brainstorming + review** | Capturing strategic discussions or design decisions | `{{config:sops_path}}/brainstorming-and-review.md` |
+| **Dev pipeline** | Creating branches, making PRs, starting any feature/fix work | `{{config:sops_path}}/dev-pipeline.md` |
+| **Versioning** | After merging PRs, before deploying, any version bump | `{{config:sops_path}}/versioning.md` |
+| **Worktree discipline** | Starting feature work (always — even solo) | `{{config:sops_path}}/worktree-discipline.md` |
+| **Retrospective** | Post-work review, extracting process patterns | `{{config:sops_path}}/retrospective-and-process-mining.md` |
+| **New repo** | Bootstrapping a new repository | `{{config:sops_path}}/new-repo-pattern.md` |
+| **PR review** | Reviewing a PR, before approving or merging | `{{config:sops_path}}/pr-review.md` |
+
+<!-- inject:after:sop-table -->
+
+### Examples
+
+**Starting a feature:**
+```
+Task: "Add a new endpoint"
+→ Activate: dev-pipeline + worktree
+→ Read both SOPs
+→ Output: "SOP: dev-pipeline | Branch: {{config:features.branch_pattern}} | Prefix: {{config:features.commit_prefix}}:"
+→ Output: "SOP: worktree | Worktree: {{config:features.worktree_pattern}} | Branch: {{branch}} | Main: untouched"
+```
+
+**After merging a PR:**
+```
+Task: "Merge PR #42"
+→ After merge, activate: versioning
+→ Read SOP
+→ Output: "SOP: versioning | Current: vX.Y.Z from {{config:versioning.manifest}} | Bump: patch → vA.B.C"
+```
+
+## Versioning & Releases
+
+See `{{config:sops_path}}/versioning.md` for the full procedure. Key repo-specific details:
+
+- Version source of truth: `{{config:versioning.manifest}}`
+- Release title format: `{{config:versioning.release_title_format}}`
+
+<!-- inject:after:versioning -->
+
+## Multi-Agent Worktree Discipline
+
+See `{{config:sops_path}}/worktree-discipline.md` for the full procedure. Key repo-specific details:
+
+- Worktree directory pattern: `{{config:features.worktree_pattern}}`
+- Example: `git worktree add {{config:features.worktree_pattern}} -b {{config:features.branch_pattern}} {{config:default_branch}}`
+
+## Bun
+
+Default to using Bun instead of Node.js.
+
+- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
+- Use `bun test` instead of `jest` or `vitest`
+- Use `bun build` instead of `webpack` or `esbuild`
+- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
+- Use `bun run <script>` instead of `npm run <script>`
+- Use `bunx <package> <command>` instead of `npx <package> <command>`
+- Bun automatically loads .env, so don't use dotenv.

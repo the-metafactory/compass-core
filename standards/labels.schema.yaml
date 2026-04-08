@@ -1,0 +1,49 @@
+# labels.schema.yaml
+#
+# The shape every consumer's labels.yaml must conform to. compass-core does NOT ship
+# a default label set — that's a project decision. compass-core ships only the schema.
+#
+# Consumers reference their own labels.yaml from compass.config.yaml's labels.source.
+
+schema: compass-labels-schema/v1
+
+definition:
+  required:
+    - labels
+  properties:
+    labels:
+      type: array
+      items:
+        type: object
+        required:
+          - name
+          - color
+          - description
+        properties:
+          name:
+            type: string
+            description: "Label slug. Must be unique within the file. Lowercase recommended, hyphen-separated."
+          color:
+            type: string
+            pattern: "^[0-9a-fA-F]{6}$"
+            description: "6-digit hex color WITHOUT leading #. Example: 'd73a4a'."
+          description:
+            type: string
+            maxLength: 100
+            description: "Short human-readable description shown in GitHub UI."
+          category:
+            type: string
+            enum: [type, priority, workflow, status, custom]
+            description: "Optional. Helps validators group labels for required-set checks."
+
+# Example consumer file:
+#
+# labels:
+#   - name: bug
+#     color: "d73a4a"
+#     description: "Something isn't working"
+#     category: type
+#   - name: now
+#     color: "0E8A16"
+#     description: "Currently being worked"
+#     category: priority
