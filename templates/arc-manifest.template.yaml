@@ -1,14 +1,16 @@
 # arc-manifest.yaml -- arc package manifest
-# Generic template shipped by compass-core. Substitute via compass.config.yaml.
+# Generic template shipped by compass-core.
+# {{config:...}} placeholders come from compass.config.yaml.
+# {{template:...}} placeholders come from the template-instantiation context (see config-schema.md → "Template inputs").
 
-name: "{{config:package_name}}"               # Package name (matches repo name by default)
+name: "{{template:package_name}}"             # Package name (matches repo name by default)
 version: "0.1.0"                              # Semantic version (bumped on each release)
-description: "{{config:repo_description}}"    # One-line description
+description: "{{template:repo_description}}"  # One-line description
 author:
-  name: "{{config:author_name}}"
-  github: "{{config:author_github}}"
-repository: "{{config:org_name}}/{{config:repo_name}}"
-license: "{{config:default_license}}"
+  name: "{{template:author_name}}"
+  github: "{{template:author_github}}"
+repository: "{{config:org.name}}/{{template:repo_name}}"
+license: "{{config:org.default_license}}"
 
 # Installation hooks (optional)
 # postinstall: "./scripts/postinstall.sh"
