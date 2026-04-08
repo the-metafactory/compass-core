@@ -1,8 +1,10 @@
-<!-- Generated from compass-core CLAUDE.md template. Customize sections marked with {{config:...}} via compass.config.yaml. -->
+<!-- Generated from compass-core CLAUDE.md template.
+     {{config:...}} placeholders come from compass.config.yaml.
+     {{template:...}} placeholders come from the template-instantiation context (see config-schema.md → "Template inputs"). -->
 
-# {{config:repo_name}} -- {{config:repo_description}}
+# {{template:repo_name}} -- {{template:repo_description}}
 
-{{config:repo_description}}
+{{template:repo_description}}
 
 <!-- inject:after:description -->
 
@@ -24,7 +26,7 @@ Every issue must have at least one type label ({{config:labels.required.types}})
 To sync labels:
 
 ```bash
-bun standards/scripts/sync-labels.ts {{config:org_name}}/{{config:repo_name}}
+bun standards/scripts/sync-labels.ts {{config:org.name}}/{{template:repo_name}}
 ```
 
 ## GitHub Issue Tracking
@@ -52,14 +54,14 @@ This repo follows compass-core SOPs. **Before starting work, identify which SOPs
 
 | SOP | Activate when | File |
 |-----|--------------|------|
-| **Design process** | Creating specs, design docs, or research docs | `{{config:sops_path}}/design-process.md` |
-| **Brainstorming + review** | Capturing strategic discussions or design decisions | `{{config:sops_path}}/brainstorming-and-review.md` |
-| **Dev pipeline** | Creating branches, making PRs, starting any feature/fix work | `{{config:sops_path}}/dev-pipeline.md` |
-| **Versioning** | After merging PRs, before deploying, any version bump | `{{config:sops_path}}/versioning.md` |
-| **Worktree discipline** | Starting feature work (always — even solo) | `{{config:sops_path}}/worktree-discipline.md` |
-| **Retrospective** | Post-work review, extracting process patterns | `{{config:sops_path}}/retrospective-and-process-mining.md` |
-| **New repo** | Bootstrapping a new repository | `{{config:sops_path}}/new-repo-pattern.md` |
-| **PR review** | Reviewing a PR, before approving or merging | `{{config:sops_path}}/pr-review.md` |
+| **Design process** | Creating specs, design docs, or research docs | `{{template:sops_path}}/design-process.md` |
+| **Brainstorming + review** | Capturing strategic discussions or design decisions | `{{template:sops_path}}/brainstorming-and-review.md` |
+| **Dev pipeline** | Creating branches, making PRs, starting any feature/fix work | `{{template:sops_path}}/dev-pipeline.md` |
+| **Versioning** | After merging PRs, before deploying, any version bump | `{{template:sops_path}}/versioning.md` |
+| **Worktree discipline** | Starting feature work (always — even solo) | `{{template:sops_path}}/worktree-discipline.md` |
+| **Retrospective** | Post-work review, extracting process patterns | `{{template:sops_path}}/retrospective-and-process-mining.md` |
+| **New repo** | Bootstrapping a new repository | `{{template:sops_path}}/new-repo-pattern.md` |
+| **PR review** | Reviewing a PR, before approving or merging | `{{template:sops_path}}/pr-review.md` |
 
 <!-- inject:after:sop-table -->
 
@@ -84,7 +86,7 @@ Task: "Merge PR #42"
 
 ## Versioning & Releases
 
-See `{{config:sops_path}}/versioning.md` for the full procedure. Key repo-specific details:
+See `{{template:sops_path}}/versioning.md` for the full procedure. Key repo-specific details:
 
 - Version source of truth: `{{config:versioning.manifest}}`
 - Release title format: `{{config:versioning.release_title_format}}`
@@ -93,10 +95,10 @@ See `{{config:sops_path}}/versioning.md` for the full procedure. Key repo-specif
 
 ## Multi-Agent Worktree Discipline
 
-See `{{config:sops_path}}/worktree-discipline.md` for the full procedure. Key repo-specific details:
+See `{{template:sops_path}}/worktree-discipline.md` for the full procedure. Key repo-specific details:
 
 - Worktree directory pattern: `{{config:features.worktree_pattern}}`
-- Example: `git worktree add {{config:features.worktree_pattern}} -b {{config:features.branch_pattern}} {{config:default_branch}}`
+- Example: `git worktree add {{config:features.worktree_pattern}} -b {{config:features.branch_pattern}} {{config:org.default_branch}}`
 
 ## Bun
 

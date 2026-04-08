@@ -128,3 +128,44 @@ plus identical references in the new package.json and bun.lock files)
 ```
 
 **Verdict:** PASS. The new validator config loader and tests reference only generic concepts (`acme-corp` in the test fixture, the documented default label set). Zero new internal references. The `package.json` adds the parent-org package name once (`@the-metafactory/compass-core`), which matches the existing `arc-manifest.yaml` allowed reference.
+
+---
+
+## v0.4.0 — 2026-04-08 — Phase D (quality hardening)
+
+**Scope of edits:**
+- `CLAUDE.md` — placeholder reference table fixed: `{{config:org_name}}`/`{{config:org_display_name}}`/`{{config:default_branch}}`/`{{config:default_license}}` → dotted notation matching the schema
+- `templates/CLAUDE.md.template` — `{{config:repo_name}}`, `{{config:repo_description}}`, `{{config:sops_path}}` migrated to a new `{{template:...}}` namespace; `{{config:org_name}}` → `{{config:org.name}}`; `{{config:default_branch}}` → `{{config:org.default_branch}}`
+- `templates/arc-manifest.template.yaml` — `{{config:package_name}}`, `{{config:repo_description}}`, `{{config:author_name}}`, `{{config:author_github}}`, `{{config:repo_name}}` → `{{template:...}}`; `{{config:org_name}}` → `{{config:org.name}}`; `{{config:default_license}}` → `{{config:org.default_license}}`
+- `claude/skills/governance/config-schema.md` — new "Template inputs" section documenting the `{{template:...}}` namespace and the six template-instantiation variables (`repo_name`, `repo_description`, `package_name`, `author_name`, `author_github`, `sops_path`); rationale for the two-namespace split spelled out
+- `claude/skills/governance/workflows/new-repo.md` — Step 6 (CLAUDE.md bootstrap) and Step 7 (arc-manifest bootstrap) updated to mention both placeholder namespaces and link to the schema
+- `standards/labels.example.yaml` (new) — starter label set matching the validator's fallback defaults so a fresh consumer can sync labels out-of-the-box without writing their own from scratch
+
+**Why this matters:**
+
+Phase B/C left the canonical schema dotted (`{{config:org.name}}`) but never propagated the change into `CLAUDE.md` and the two `templates/`, which still used the legacy underscored form. This release closes that gap and additionally introduces a clean separation between *config-driven* placeholders (read from `compass.config.yaml`) and *template-instantiation* placeholders (provided by the developer running the `new-repo` workflow). The two now live in distinct namespaces (`{{config:...}}` vs `{{template:...}}`), so workflows can confidently say: "if it's `{{config:...}}`, it's already in the consumer's config — never prompt."
+
+**Audit pattern 1** — broad forbidden terms:
+
+```
+(only previously-allowed factual package-metadata references remain — same set as v0.1.0/v0.2.0/v0.3.0;
+no new hits introduced by the placeholder rename or the new labels.example.yaml)
+```
+
+**Audit pattern 2** — specific internal references:
+
+```
+(no matches outside leak-audit.md itself)
+```
+
+**Audit pattern 3** — internal SOPs / infra terminology:
+
+```
+(no matches outside leak-audit.md itself; the initial draft of config-schema.md → "Template inputs"
+used the word "operator" five times, which tripped the audit because internal metafactory roles use
+that term — replaced with "the developer running new-repo" / "the developer" before commit)
+```
+
+**Test suite:** `bun test` → 15 pass / 0 fail (config loader: 8 tests; claude-md-check.ts: 7 tests).
+
+**Verdict:** PASS — all three audit patterns clean, all tests green, the placeholder contract is now consistent end-to-end across CLAUDE.md, templates, schema doc, and workflows. The quality hardening pass uncovered (and fixed) a real false-positive leak ("operator") that the previous releases would have missed if not for the iterated audit. **This entry doubles as the comprehensive final audit covering v0.1.0 → v0.4.0.**

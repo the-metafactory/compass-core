@@ -1,0 +1,42 @@
+# labels.example.yaml — starter label set matching compass-core's validator defaults
+#
+# Copy this file into your project (e.g., as standards/labels.yaml) and reference
+# it from your compass.config.yaml as `labels.source: standards/labels.yaml`.
+#
+# This set matches the fallback used by engine/validators/label-check.ts when no
+# config is present, so a fresh consumer can use it as-is and pass validation.
+#
+# Edit colors / add categories / extend with project-specific labels as needed.
+
+labels:
+  # Type labels — every issue must have at least one of these
+  - name: bug
+    color: "d73a4a"
+    description: "Something isn't working"
+    category: type
+  - name: documentation
+    color: "0075ca"
+    description: "Improvements or additions to documentation"
+    category: type
+  - name: feature
+    color: "1D76DB"
+    description: "Feature specification"
+    category: type
+  - name: infrastructure
+    color: "5319E7"
+    description: "Cross-cutting infrastructure work"
+    category: type
+
+  # Priority labels — every open issue must have at least one of these
+  - name: now
+    color: "0E8A16"
+    description: "Currently being worked"
+    category: priority
+  - name: next
+    color: "FBCA04"
+    description: "Next up after current work"
+    category: priority
+  - name: future
+    color: "C5DEF5"
+    description: "Planned but not yet scheduled"
+    category: priority

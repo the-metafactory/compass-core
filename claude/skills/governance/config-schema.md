@@ -182,7 +182,30 @@ All placeholders use dotted notation matching the config key path:
 | `{{config:versioning.manifest}}` | `versioning.manifest` |
 | `{{config:versioning.release_title_format}}` | `versioning.release_title_format` |
 
-If you see a placeholder in a compass-core file that isn't in this table, it's a bug — file an issue.
+If you see a `{{config:...}}` placeholder in a compass-core file that isn't in this table, it's a bug — file an issue.
+
+---
+
+## Template inputs
+
+In addition to `{{config:...}}` placeholders (which come from `compass.config.yaml`), compass-core's templates use a separate `{{template:...}}` namespace for values that are supplied at template-instantiation time — i.e., facts about the *new repo being bootstrapped* that don't live in the existing repo's config.
+
+These are used by `templates/CLAUDE.md.template` and `templates/arc-manifest.template.yaml` during the `new-repo` workflow.
+
+| Placeholder | Provided by | Purpose |
+|-------------|-------------|---------|
+| `{{template:repo_name}}` | the developer running `new-repo` | Slug of the new repo (e.g., `acme-pipeline`) |
+| `{{template:repo_description}}` | the developer | One-line description of the new repo |
+| `{{template:package_name}}` | the developer | arc package name (often `@{{config:org.name}}/{{template:repo_name}}`) |
+| `{{template:author_name}}` | the developer | Human / team owner name for the manifest |
+| `{{template:author_github}}` | the developer | GitHub handle for the manifest |
+| `{{template:sops_path}}` | new-repo workflow | Path the new repo will use to reference SOPs (e.g., `sops`, `compass-core/sops`) |
+
+Why two namespaces? `compass.config.yaml` describes the *current* repo's governance values and is read at every workflow invocation. Template inputs describe a *new* repo at creation time and are only meaningful during a one-shot bootstrap. Keeping them separate lets workflows say with confidence "if it's `{{config:...}}`, it's already in the consumer's config — never prompt the developer for it."
+
+If you see a `{{template:...}}` placeholder in a compass-core file that isn't in this table, it's a bug — file an issue.
+
+---
 
 ## Defaults
 
