@@ -28,10 +28,10 @@ org:
 
 | Key | Used by | Purpose |
 |-----|---------|---------|
-| `org.name` | `new-repo`, `version-bump`, validators | The git host org slug. Replaces `{{config:org_name}}`. |
-| `org.display_name` | templates, READMEs | Human-readable brand name. Replaces `{{config:org_display_name}}`. |
-| `org.default_license` | `new-repo`, templates | SPDX license identifier. Replaces `{{config:default_license}}`. |
-| `org.default_branch` | `dev-pipeline`, `worktree-setup` | Default branch name. Replaces `{{config:default_branch}}`. |
+| `org.name` | `new-repo`, `version-bump`, validators | The git host org slug. Replaces `{{config:org.name}}`. |
+| `org.display_name` | templates, READMEs | Human-readable brand name. Replaces `{{config:org.display_name}}`. |
+| `org.default_license` | `new-repo`, templates | SPDX license identifier. Replaces `{{config:org.default_license}}`. |
+| `org.default_branch` | `dev-pipeline`, `worktree-setup` | Default branch name. Replaces `{{config:org.default_branch}}`. |
 
 ---
 
@@ -103,14 +103,16 @@ validators:
 versioning:
   manifest: arc-manifest.yaml                                    # default
   release_title_format: "{repo} v{version} — {description}"      # default
-  registry: {}                                                   # optional
+  deploy_command: ""                                             # optional
 ```
 
 | Key | Used by | Purpose |
 |-----|---------|---------|
 | `versioning.manifest` | `version-bump` | Path to the file that holds the canonical version. |
 | `versioning.release_title_format` | `version-bump` | Format string for `gh release create --title`. `{repo}`, `{version}`, `{description}` are substituted. |
-| `versioning.registry` | `version-bump` (optional) | Project-specific registry update procedure. Project-defined block. |
+| `versioning.deploy_command` | `version-bump` (optional) | Shell command run after release creation if your tooling has one (e.g., `arc upgrade {repo}`). compass-core does not prescribe a deploy command. |
+
+For project-specific registry updates (a `REGISTRY.yaml` or equivalent that needs to be bumped after every release), use the `extensions.registry` block below — registries vary too much across organizations to live in the core schema.
 
 ---
 
@@ -123,9 +125,23 @@ extensions:
     steps:                                      # optional
       - "Apply SAML SSO settings"
       - "Add to internal CODEOWNERS map"
+  registry:
+    repo: my-org/registry-repo                  # optional
+    file: REGISTRY.yaml
+    update_command: |
+      cd ../registry-repo
+      # edit REGISTRY.yaml: set version for {{repo_name}} to {{new_version}}
+      git add REGISTRY.yaml
+      git commit -m "chore: bump {{repo_name}} to v{{new_version}}"
+      git push origin main
 ```
 
 The `extensions` block is where the consumer adds project-specific procedures that aren't generic enough for compass-core. compass-core's workflows look up `extensions.<workflow_name>` and run whatever is there. Anything inside `extensions` is opaque to compass-core — the consumer is responsible for its shape and content.
+
+| Extension | Used by | Purpose |
+|-----------|---------|---------|
+| `extensions.new_repo` | `new-repo` workflow | Org-specific bootstrap steps (chat channels, deploys, dashboards, secret stores) that run after the seven generic steps. |
+| `extensions.registry` | `version-bump` workflow | Org-specific package registry that needs version sync after each release. |
 
 ---
 
@@ -133,12 +149,14 @@ The `extensions` block is where the consumer adds project-specific procedures th
 
 Every `{{config:...}}` placeholder used anywhere in compass-core resolves to a key in this config:
 
+All placeholders use dotted notation matching the config key path:
+
 | Placeholder | Config key |
 |------------|-----------|
-| `{{config:org_name}}` | `org.name` |
-| `{{config:org_display_name}}` | `org.display_name` |
-| `{{config:default_license}}` | `org.default_license` |
-| `{{config:default_branch}}` | `org.default_branch` |
+| `{{config:org.name}}` | `org.name` |
+| `{{config:org.display_name}}` | `org.display_name` |
+| `{{config:org.default_license}}` | `org.default_license` |
+| `{{config:org.default_branch}}` | `org.default_branch` |
 | `{{config:features.id_prefix}}` | `features.id_prefix` |
 | `{{config:features.branch_pattern}}` | `features.branch_pattern` |
 | `{{config:features.worktree_pattern}}` | `features.worktree_pattern` |

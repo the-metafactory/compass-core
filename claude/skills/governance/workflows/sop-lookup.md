@@ -50,4 +50,4 @@
 ## Failure Modes
 
 - **Topic doesn't map to any SOP:** Tell the requester the available SOPs and ask them to clarify.
-- **SOP is a placeholder (Phase B not done):** Tell them the SOP is a v0.1.0 placeholder, full content lands in v0.2.0, and link to the placeholder file so they can read the target shape.
+- **SOP file missing:** Surface the path you looked at and tell the requester compass-core may be incomplete or out of date.
