@@ -117,12 +117,15 @@ labels:
     expect(cfg!.labels?.required?.priorities).toEqual(["now", "next"]);
   });
 
-  test("throws on a YAML file that is not an object", () => {
+  test("throws on a YAML file that is a list", () => {
     writeFileSync(join(tmp, "compass.config.yaml"), "- just\n- a\n- list\n");
     process.chdir(tmp);
-    // YAML lists do parse to an object (array), so this should NOT throw — instead test scalar
-    rmSync(join(tmp, "compass.config.yaml"));
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("throws on a YAML file that is a scalar", () => {
     writeFileSync(join(tmp, "compass.config.yaml"), "scalar string\n");
+    process.chdir(tmp);
     expect(() => loadConfig()).toThrow();
   });
 
