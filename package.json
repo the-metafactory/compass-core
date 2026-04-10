@@ -11,7 +11,8 @@
     "validate:all": "bun engine/ci/run-all.ts"
   },
   "dependencies": {
-    "yaml": "^2.4.0"
+    "yaml": "^2.4.0",
+    "zod": "4.3.6"
   },
   "devDependencies": {
     "@types/bun": "latest"
