@@ -26,6 +26,11 @@ import { z } from "zod";
  * element-by-element to catch stray non-strings (e.g., an unquoted `yes` that
  * YAML parses as a boolean) before they reach a downstream consumer.
  */
+// Design note: nested objects use strict z.object() (not passthrough) so that
+// typos inside known sections (e.g., org.naem instead of org.name) surface as
+// validation errors rather than being silently preserved. Only the top level
+// uses passthrough() because unknown *top-level* keys are the expected
+// extension mechanism (see `extensions:` block and forward-compat test).
 export const CompassConfigSchema = z
   .object({
     schema: z.string().optional(),
