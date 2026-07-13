@@ -14,10 +14,10 @@ org segment and `<app>` for an individual application.
 
 ## 1. The five classes
 
-Every file an app writes falls into exactly one of five classes. Classify by asking: *is it
-directly runnable? → is it durable user/app data the app owns? → is it a config value a human or
-install step sets? → is it operational state (logs, PID files, view state) the app regenerates on
-restart? → is it disposable and safe to delete?*
+Every file an app writes falls into exactly one of five classes. Classify by asking (in the same
+order as the table below): *is it directly runnable? → is it a config value a human or install step
+sets? → is it durable user/app data the app owns? → is it operational state (logs, PID files, view
+state) the app regenerates on restart? → is it disposable and safe to delete?*
 
 | Class | Spec var → fallback | Holds |
 |---|---|---|
@@ -104,7 +104,7 @@ For every class, resolve in this order — **first match wins**:
 1. **App-specific override** — an env var scoped to one app that overrides everything else for that
    app (e.g. `<APP>_CONFIG_DIR`, `<APP>_DATA_DIR`).
 2. **The matching `$XDG_*` variable** — `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
-   `XDG_CACHE_HOME`. Honored if set and non-empty, per spec.
+   `XDG_CACHE_HOME`. Honored only if set to a non-empty **absolute** path, per spec.
 3. **Spec fallback** — `~/.config`, `~/.local/share`, `~/.local/state`, `~/.cache` (cache is the
    spec's one exception to the `~/.local/*` pattern) respectively; `~/.local/bin` for executables
    (no spec var — pure convention).
@@ -112,7 +112,9 @@ For every class, resolve in this order — **first match wins**:
 An app must never invent its own default that diverges from the spec fallback when no override or
 `$XDG_*` var is set — divergent per-app defaults are what make a pre-standard layout inconsistent in
 the first place (one app honoring its own override but not `$XDG_CONFIG_HOME`, another ignoring
-both). Treat empty or whitespace-only values as unset.
+both). Per the spec, a `$XDG_*` value that is **not an absolute path** is invalid and must be
+ignored — fall through to the spec fallback. Treat empty, whitespace-only, or relative values as
+unset.
 
 ---
 
