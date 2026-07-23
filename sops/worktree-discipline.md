@@ -58,6 +58,24 @@ cd ../myapp-payment-flow && bun install
 - Commit and push from the worktree, not the main directory.
 - PRs are created from the worktree branch as normal.
 
+## Basing a worktree on an existing PR
+
+When you pick up or **expand an existing PR** (yours or a teammate's), base the
+worktree on the PR's **actual head ref**, never a local branch of the same name —
+a same-named local branch is routinely stale by one or more commits, and building
+on it silently duplicates work already pushed to the PR (and can clobber it).
+
+```bash
+# Correct — fetch the PR's real head, then branch from it:
+gh pr checkout {N}                       # checks out the PR head into a tracking branch
+#   or, for a worktree:
+git fetch origin pull/{N}/head && git worktree add ../{repo}-pr{N} FETCH_HEAD
+```
+
+Before adding your commit, confirm the base: `git log --oneline -1` should match
+the PR's head SHA (`gh pr view {N} --json headRefOid -q .headRefOid`). If it
+doesn't, you're on a stale base — reset to the real head before touching a line.
+
 ## Cleanup
 
 When your feature is merged, remove the worktree:

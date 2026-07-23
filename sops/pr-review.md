@@ -29,6 +29,30 @@ Verify before proceeding:
 
 ---
 
+## Before you modify a PR (push a fix onto someone else's branch)
+
+Reviewing may end in a fix you push to the PR's branch. Before you do, check
+**where the branch lives** — many PRs come from a fork, and pushing to the wrong
+remote silently misses the PR:
+
+```bash
+gh pr view {N} --json headRepository,headRepositoryOwner,maintainerCanModify \
+  -q '.headRepositoryOwner.login+"/"+.headRepository.name+"  maintainerCanModify="+(.maintainerCanModify|tostring)'
+```
+
+- **Head repo is your own org** → push to `origin` as normal.
+- **Head repo is a fork** → you can push only if `maintainerCanModify` is true,
+  and you must push to the **fork's** branch, not `origin`. A push to `origin`
+  creates a stray branch there that is **not** attached to the PR (a `git push`
+  reporting `[new branch]` for a branch you expected to already exist is the
+  tell). Add the fork as a remote (`git remote add fork <fork-url>`) and push to
+  it, or use `gh pr checkout {N}` which wires the correct push target for you.
+
+Base any such fix on the PR's real head first — see
+[worktree-discipline: Basing a worktree on an existing PR](./worktree-discipline.md#basing-a-worktree-on-an-existing-pr).
+
+---
+
 ## Review Lenses
 
 Apply these lenses based on workflow and diff content:
