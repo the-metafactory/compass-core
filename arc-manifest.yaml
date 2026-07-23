@@ -2,7 +2,8 @@
 #
 # WHAT ARC DOES WITH THIS PACKAGE, EXACTLY
 # ----------------------------------------
-# It fetches it. That is the whole contract.
+# It fetches it, and it symlinks the two `provides.files` drops declared
+# below into ~/.claude. That is the whole contract.
 #
 #     arc install @the-metafactory/compass-core   # puts the package in the store
 #     bun <store-path>/engine/install.ts <your-repo> [--with-ci]
@@ -29,15 +30,17 @@
 #     use them through their own renderer, which does speak that grammar.
 #
 #   * `provides.skill` and `provides.agent` were inert. arc symlinks into
-#     ~/.claude off the package's `type:`, not off `provides` (arc: src/lib/
-#     artifact-installer.ts:173-333), and `type: governance` links neither a
-#     skill nor an agent. `provides.agent` is not a key arc has at all, and
-#     `provides.skill` is typed `{ trigger }[]`, read only by `arc info`'s
-#     printer — never by the linker. Both are gone rather than reshaped: a
-#     declaration whose only effect is to make a reader believe an install
-#     happened is worse than silence. claude/skills/governance and
-#     claude/agents/governance.md are still in the tree, and reach ~/.claude by
-#     being installed there deliberately, not as a side effect of arc install.
+#     ~/.claude off the package's `type:`, not off `provides`, and
+#     `type: governance` links neither a skill nor an agent. `provides.agent`
+#     is not a key arc has at all, and `provides.skill` is typed
+#     `{ trigger }[]`, read only by `arc info`'s printer — never by the
+#     linker. Both are gone rather than reshaped: a declaration whose only
+#     effect is to make a reader believe an install happened is worse than
+#     silence. claude/skills/governance and claude/agents/governance.md now
+#     reach ~/.claude through `provides.files` below — a key arc DOES honor,
+#     for every package type (arc v0.45.0: src/lib/artifact-installer.ts:324,
+#     the type-agnostic provides.files pass, arc#84) — an install-time
+#     symlink, declared, not a manual copy.
 #
 #   * `provides.validators`, `provides.ci` and `requires.config` were not arc
 #     keys in any version. arc validates nothing under `provides` and ignores
@@ -68,7 +71,7 @@ name: "@the-metafactory/compass-core"
 # attached, and it belongs to a release, not to a defect fix whose subject is
 # clobbering. Left loud, and left failing validation on purpose, rather than
 # changed quietly here.
-version: 0.4.3
+version: 0.5.0
 type: governance
 tier: official
 description: >-
@@ -81,6 +84,17 @@ author:
   github: the-metafactory
 repository: the-metafactory/compass-core
 license: MIT
+
+# Install-time drops (arc#361): arc symlinks each source to its target via the
+# type-agnostic provides.files pass, honored for every package type since
+# v0.45.0 (arc: src/lib/artifact-installer.ts:324, arc#84). These two entries
+# are the ONLY things arc installs from this package.
+provides:
+  files:
+    - source: claude/skills/governance
+      target: ~/.claude/skills/Governance
+    - source: claude/agents/governance.md
+      target: ~/.claude/agents/governance.md
 
 # All four sub-blocks are declared, empties included: arc requires the block in
 # full so that risk is never silently defaulted to "low" (arc: src/lib/validate-
