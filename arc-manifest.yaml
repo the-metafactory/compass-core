@@ -1,5 +1,5 @@
 name: "@the-metafactory/compass-core"
-version: 0.4.1
+version: 0.4.2
 type: governance
 description: "Reusable governance engine for Claude Code projects — SOPs, validators, governance skill + subagent, CLAUDE.md template"
 author:
@@ -10,9 +10,9 @@ license: MIT
 
 provides:
   skill:
-    - name: Governance
+    - name: governance
       path: claude/skills/governance
-      install: ~/.claude/skills/Governance
+      install: ~/.claude/skills/governance
   agent:
     - name: governance
       path: claude/agents/governance.md

@@ -1,5 +1,5 @@
 ---
-name: Governance
+name: governance
 description: |
   Governance engine for any Claude Code project that adopts compass-core. Knows all SOPs,
   runs validators, bootstraps repos, enforces project standards.
