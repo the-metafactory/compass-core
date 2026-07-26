@@ -147,6 +147,28 @@ completed migration. Every app doing this classification must produce this table
 deliverable, not assume the pattern above generalizes without checking its own artifacts. A separate
 reader process typically needs an explicit env var to find the new location.
 
+### Host directories that trend toward protection (hard constraint)
+
+The STAYS/MOVES line above is a *design* rule. A host tool that starts **enforcing** protection on
+its own directory turns it into a *breakage* rule — and hosts are moving that way. Anthropic's Claude
+Code is doing exactly this: `~/.claude` is trending toward tool-enforced **protected paths**
+([code.claude.com/docs/en/permission-modes#protected-paths](https://code.claude.com/docs/en/permission-modes#protected-paths)),
+where the host may deny writes it doesn't own. Consequences for a guest app:
+
+- **Keep the STAYS set minimal and genuinely host-read.** Only artifacts the host discovers by fixed
+  path belong in a protected host tree; everything else MOVES, no exceptions. "It was convenient"
+  stops being a valid reason the day the host enforces.
+- **App-private state under a protected host dir is a latent failure, not a style nit.** It works
+  until a host release enforces, then the whole pipeline breaks at once, on every installed machine.
+  Treat a host directory as read-mostly and host-owned.
+- **Precedent worth not re-learning:** a personal-AI project that leaned on writing its own runtime
+  state under `~/.claude` turned into a mess of permission workarounds the moment the host tightened.
+
+When a host's protection stance is unclear, **default to MOVE** and cite the host's own docs in the
+classification table. Grandfathered writes already living in a protected host dir are a migration
+debt, not a precedent — track their disposition explicitly rather than letting "it's already there"
+harden into the rule.
+
 ---
 
 ## 7. Migration-on-touch
