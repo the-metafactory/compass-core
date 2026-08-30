@@ -25,14 +25,32 @@ Verify before proceeding:
 
 ### 1. Create the repository on the host
 
+**Visibility is an explicit decision, not a silent default.** Before running
+`gh repo create`, decide — and record in the tracking issue — whether this repo
+is `public` or `private`. Does it ship a product or package meant for external
+consumers (public), or does it carry operational, client, or privately-held
+content (private)? **Do not default to `--public`.** Accepting the default is
+how repos go live before anyone has reviewed what is in them or registered
+that they exist.
+
 ```bash
-gh repo create {{config:org.name}}/{repo-name} --public --clone
+# Pick ONE, deliberately:
+gh repo create {{config:org.name}}/{repo-name} --public --clone   # ships to external consumers
+gh repo create {{config:org.name}}/{repo-name} --private --clone  # internal / client / operational
 cd {repo-name}
 ```
 
 - Initialize with README.md
 - Add the org's default license: `{{config:org.default_license}}`
 - Set default branch to `{{config:org.default_branch}}`
+
+**If public, turn on the security baseline in the same session — don't defer it.**
+At minimum: secret scanning, push protection, and a branch protection ruleset on
+`{{config:org.default_branch}}`. A public repo without push protection can accept
+a committed secret before anyone notices it exists, and the window between
+`gh repo create --public` and "I'll harden it tomorrow" is exactly when the first
+commits land. If your overlay vendors a security-baseline tool, run it here;
+otherwise configure the settings directly via `gh api` or the repo settings UI.
 
 ### 2. Apply the standard label set
 
@@ -77,6 +95,25 @@ bun <compass-core>/engine/ci/run-all.ts --owner {{config:org.name}} --repo {repo
 
 Add an equivalent CI job in your repo's pipeline (GitHub Actions, CircleCI, etc.). The validators are repo-agnostic — they read `compass.config.yaml` for required sections, label set, and other policy.
 
+**Sequencing a new required check — avoid the bootstrap deadlock.** Do **not**
+make any new CI gate a required status check on day one of a brand-new repo.
+Bring it up in this order:
+
+1. Wire the gate as a **non-required** (warn-only) job first.
+2. Confirm it is green on a burn-in PR or two.
+3. **Only then** add it to required status checks.
+
+Flipping a gate to required before step 2 creates a deadlock: an empty repo
+with no prior burn-in has no way to merge its own first PR if the caller
+workflow has a typo or the gate misfires. The gate is meant to block bad
+changes, not to block the repo from ever having a good one.
+
+**Break-glass (logged, not silent).** If a required gate is genuinely blocked
+by a CI outage and an urgent merge cannot wait, an admin merge is permitted
+only as a logged exception: comment on the PR with the reason and a link to
+the outage, then merge. Routine `--admin` use to skip a gate is not
+break-glass — it is the bypass habit that makes the gate decorative.
+
 ### 6. Register the repo in the project's ecosystem registry (optional)
 
 If your overlay maintains an ecosystem registry (a YAML file listing every repo, used by downstream tools like dashboards or aggregated digests), add an entry there:
@@ -88,7 +125,13 @@ If your overlay maintains an ecosystem registry (a YAML file listing every repo,
   type: {product|infrastructure|tool|skill}
   url: https://github.com/{{config:org.name}}/{repo-name}
   status: active
+  visibility: {public|private}   # the decision made in Step 1 — never omitted
 ```
+
+The `visibility:` field is not optional metadata: it is what lets a registry
+validator fail closed on a live public repo that nobody registered. If your
+registry omits it, an unregistered public repo is indistinguishable from an
+unregistered private one.
 
 compass-core does NOT prescribe an ecosystem registry format. If your overlay has one, document its location in your overlay's CLAUDE.md.
 
@@ -134,7 +177,7 @@ After completing all applicable steps, verify:
 - [ ] CLAUDE.md present and passes `bun engine/validators/claude-md-check.ts`
 - [ ] `{{config:versioning.manifest}}` present with correct metadata
 - [ ] Validators pass via `bun engine/ci/run-all.ts`
-- [ ] Registered in the ecosystem registry (if applicable)
+- [ ] Registered in the ecosystem registry (if applicable), including an explicit `visibility:` value (never the silent public default)
 - [ ] First tracking issue created with appropriate labels
 - [ ] Any `extensions.new_repo.script` ran successfully
 
