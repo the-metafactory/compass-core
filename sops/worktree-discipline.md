@@ -9,8 +9,10 @@
 
 After reading this SOP, output:
 ```
-SOP: worktree | Worktree: ../{repo}-{slug} | Branch: feat/{name} | Main: untouched
+SOP: worktree | Worktree: ../{repo}-{slug} | Branch: {type}/{name} | Main: untouched
 ```
+Where `{type}` is one of `feat` (new feature), `fix` (bug fix), `infra` (tooling/CI), `docs` (documentation), `chore` (version bumps, metadata). The default for new feature work is `{{config:features.commit_prefix}}`.
+
 Verify before proceeding:
 - You are NOT switching branches in the main worktree
 - The worktree directory does not already exist
@@ -33,23 +35,32 @@ When two agents share a worktree, they can conflict by:
 
 ```bash
 # From the repo root, create a worktree for your feature:
-git worktree add ../{repo}-{slug} -b feat/{branch-name} main
+git worktree add ../{repo}-{slug} -b {type}/{branch-name} origin/{{config:org.default_branch}}
 
-# Install dependencies in the new worktree:
-cd ../{repo}-{slug} && bun install
+# Install dependencies in the new worktree, using your stack's installer:
+cd ../{repo}-{slug} && <install command>    # e.g. bun install
 ```
 
-Example:
+**Base new branches on the remote default branch (`origin/{{config:org.default_branch}}`), not the local one.** The local default branch may lag behind the remote, and branching from a stale local tip means you rediscover — or silently revert — work that already merged.
+
+Examples:
 ```bash
-git worktree add ../myapp-payment-flow -b feat/f-042-payment-flow main
-cd ../myapp-payment-flow && bun install
+# Feature
+git worktree add ../myapp-payment-flow -b feat/f-042-payment-flow origin/main
+
+# Bug fix
+git worktree add ../myapp-home-responsive -b fix/home-responsive-layout origin/main
+
+# Infrastructure
+git worktree add ../myapp-ci-cache -b infra/f-210-ci-cache origin/main
 ```
 
 ## Naming Conventions
 
 - Worktree directories go in sibling directories: `../{repo}-{slug}`
-- The slug should match the branch name's slug portion
+- The slug should match the branch name's slug portion (minus the `{type}/` prefix)
 - Examples: `../myapp-auth`, `../myapp-search-index`, `../myapp-billing-fix`
+- Branch prefix matches the change type: `feat/`, `fix/`, `infra/`, `docs/`, `chore/`. The prefix shows up in commit messages and the PR list — use it consistently.
 
 ## Working Rules
 
@@ -78,23 +89,61 @@ doesn't, you're on a stale base — reset to the real head before touching a lin
 
 ## Cleanup
 
-When your feature is merged, remove the worktree:
+After a PR merges, clean up in this order. Skipping steps leaves stale state that confuses future agents and `git worktree list` / `git branch` output.
+
+### 1. Remove the worktree directory
 
 ```bash
 git worktree remove ../{repo}-{slug}
 ```
 
-If the directory was already deleted, prune stale entries:
+If the directory was already deleted (or `remove` complains about being locked), prune stale entries:
 
 ```bash
 git worktree prune
+```
+
+### 2. Delete the local branch
+
+`git worktree remove` does NOT delete the branch — the branch stays in your local repo pointing at the pre-merge tip. Delete it:
+
+```bash
+git branch -d {type}/{branch-name}
+```
+
+`-d` (lowercase) is safe: it refuses to delete a branch that isn't merged. If git warns "not yet merged to HEAD" but the branch IS merged upstream via squash merge, that warning is expected — the branch's literal tip is not in the default branch's history because a squash merge creates a new commit that is not a descendant of the feature branch's tip. Verify the PR is merged with `gh pr view <pr-number> --json state --jq .state` (or `gh pr list --head {type}/{branch-name} --state merged` if you don't remember the PR number), then use `git branch -D` (capital D, force) to delete the local branch.
+
+### 3. Delete the remote branch
+
+If `gh pr merge --delete-branch` was used, the remote branch is already gone — nothing to do. If the host has "automatically delete head branches" enabled at the repo level, same. Otherwise:
+
+```bash
+git push origin --delete {type}/{branch-name}
+```
+
+Never force-push or delete branches belonging to other active worktrees — check `git worktree list` first.
+
+### 4. Sync the main worktree
+
+Bring the main worktree up to the new tip so subsequent work starts from the merged state:
+
+```bash
+# Find the primary worktree path — it's the first entry in `git worktree list`:
+git worktree list
+
+cd /path/to/primary-worktree   # the original repo root, NOT the sibling worktree you just removed
+git pull origin {{config:org.default_branch}}
 ```
 
 ## Quick Reference
 
 | Action | Command |
 |--------|---------|
-| Create worktree | `git worktree add ../{repo}-{slug} -b feat/{branch} main` |
+| Create worktree | `git worktree add ../{repo}-{slug} -b {type}/{branch} origin/{{config:org.default_branch}}` |
 | List worktrees | `git worktree list` |
 | Remove worktree | `git worktree remove ../{repo}-{slug}` |
-| Prune stale | `git worktree prune` |
+| Prune stale worktrees | `git worktree prune` |
+| Delete local branch (merged) | `git branch -d {type}/{branch}` |
+| Delete local branch (force, post-squash-merge) | `git branch -D {type}/{branch}` |
+| Delete remote branch | `git push origin --delete {type}/{branch}` |
+| Sync main after merge | `cd /path/to/main && git pull origin {{config:org.default_branch}}` |
