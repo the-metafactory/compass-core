@@ -60,7 +60,7 @@ refactor: extract label parsing into shared util
 4. **Push** — `git push -u origin {{config:features.branch_pattern}}`
 5. **PR** — `gh pr create` with clear title and description. Link to the tracking issue.
 6. **Review** — Address feedback. Keep commits clean.
-7. **Merge** — Squash or merge to the default branch. Delete the feature branch.
+7. **Merge** — Squash or merge to the default branch. Delete the feature branch. For worktree-based work, follow the full cleanup procedure in [`sops/worktree-discipline.md`](./worktree-discipline.md#cleanup) (remove worktree → delete local branch → delete remote branch → sync primary worktree).
 8. **Version** — Bump `{{config:versioning.manifest}}`, commit, push, create release.
 
 ## Rules
