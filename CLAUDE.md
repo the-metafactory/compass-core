@@ -37,6 +37,7 @@ This repo dogfoods the SOPs it ships. Before starting work, identify which SOPs 
 | **New repo pattern** | Bootstrapping a new repository | `sops/new-repo-pattern.md` *(placeholder until Phase B)* |
 | **Autonomous work** | Driving a queue of slices to merge unattended | `sops/autonomous-work.md` |
 | **In-session dev loop** | Driving feedback to shipped with the principal present | `sops/in-session-dev-loop.md` |
+| **Plan breakdown** | Turning a review or plan into an epic + executor-grade issues | `sops/plan-breakdown.md` |
 
 ## Configuration Model
 
