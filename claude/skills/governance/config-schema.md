@@ -111,6 +111,23 @@ If no config file is found, both validators fall back to the documented defaults
 
 ---
 
+## `channels` (optional)
+
+```yaml
+channels:
+  team: "#eng-internal"      # optional
+  public: "#community"       # optional
+```
+
+| Key | Used by | Purpose |
+|-----|---------|---------|
+| `channels.team` | `autonomous-work`, `in-session-dev-loop` | The internal channel the loop reports into: per-merge one-liners, the running dev narrative, the handover. Replaces `{{config:channels.team}}`. |
+| `channels.public` | `in-session-dev-loop` | An outward-facing community channel, if the project has one. The SOPs treat it as sign-off-only, public-safe copy — never the default destination. Replaces `{{config:channels.public}}`. |
+
+compass-core does not post anywhere and does not integrate with any chat platform. These values exist only so a SOP that says "narrate to the team channel" can name the actual channel in a consuming repo. Omit the block entirely and the SOPs read as plain prose — no workflow depends on a channel being configured.
+
+---
+
 ## `versioning`
 
 ```yaml
@@ -179,6 +196,8 @@ All placeholders use dotted notation matching the config key path:
 | `{{config:labels.required.types}}` | `labels.required.types` |
 | `{{config:labels.required.priorities}}` | `labels.required.priorities` |
 | `{{config:validators.claude_md.required_sections}}` | `validators.claude_md.required_sections` |
+| `{{config:channels.team}}` | `channels.team` |
+| `{{config:channels.public}}` | `channels.public` |
 | `{{config:versioning.manifest}}` | `versioning.manifest` |
 | `{{config:versioning.release_title_format}}` | `versioning.release_title_format` |
 

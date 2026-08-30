@@ -35,6 +35,7 @@ This repo dogfoods the SOPs it ships. Before starting work, identify which SOPs 
 | **Brainstorming + review** | Capturing strategic discussions or design decisions | `sops/brainstorming-and-review.md` |
 | **Retrospective** | Post-work review, extracting process patterns | `sops/retrospective-and-process-mining.md` |
 | **New repo pattern** | Bootstrapping a new repository | `sops/new-repo-pattern.md` *(placeholder until Phase B)* |
+| **Autonomous work** | Driving a queue of slices to merge unattended | `sops/autonomous-work.md` |
 
 ## Configuration Model
 
@@ -52,6 +53,8 @@ compass-core is parameterized via `compass.config.yaml` in the consuming repo. S
 | `{{config:labels.required.types}}` | Required type labels |
 | `{{config:labels.required.priorities}}` | Required priority labels |
 | `{{config:validators.claude_md.required_sections}}` | CLAUDE.md sections to enforce |
+| `{{config:channels.team}}` | Internal channel the loop SOPs report into |
+| `{{config:channels.public}}` | Outward-facing channel (sign-off only) |
 | `{{config:versioning.manifest}}` | Version source of truth |
 | `{{config:versioning.release_title_format}}` | Release title format |
 

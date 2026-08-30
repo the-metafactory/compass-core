@@ -36,6 +36,14 @@ validators:
     enabled: true
     enforce_required: true
 
+# Optional. Where the loop SOPs report progress. compass-core never posts
+# anywhere itself — these names are substituted into SOP prose so "the team
+# channel" resolves to something concrete. Omit the block and the SOPs read as
+# plain prose.
+channels:
+  team: "#eng-internal"      # internal narrative: dev loop, merges, handovers
+  public: "#community"       # optional; public-safe copy only, per-post sign-off
+
 versioning:
   manifest: arc-manifest.yaml
   release_title_format: "{repo} v{version} — {description}"

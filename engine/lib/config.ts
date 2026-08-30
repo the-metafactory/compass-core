@@ -77,6 +77,15 @@ export const CompassConfigSchema = z
           .optional(),
       })
       .optional(),
+    // Chat/comms surfaces the loop SOPs report into. compass-core never posts
+    // anywhere itself — these are names the SOPs substitute into their prose so
+    // "the team channel" resolves to something concrete in a consuming repo.
+    channels: z
+      .object({
+        team: z.string().optional(),
+        public: z.string().optional(),
+      })
+      .optional(),
     versioning: z
       .object({
         manifest: z.string().optional(),
