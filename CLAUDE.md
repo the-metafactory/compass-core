@@ -36,6 +36,7 @@ This repo dogfoods the SOPs it ships. Before starting work, identify which SOPs 
 | **Retrospective** | Post-work review, extracting process patterns | `sops/retrospective-and-process-mining.md` |
 | **New repo pattern** | Bootstrapping a new repository | `sops/new-repo-pattern.md` *(placeholder until Phase B)* |
 | **Autonomous work** | Driving a queue of slices to merge unattended | `sops/autonomous-work.md` |
+| **In-session dev loop** | Driving feedback to shipped with the principal present | `sops/in-session-dev-loop.md` |
 
 ## Configuration Model
 

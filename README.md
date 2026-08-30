@@ -14,7 +14,7 @@ Four governance surfaces, all wired to one config:
 | **Subagent** | `claude/agents/governance.md` | Autonomous governance task execution from another agent |
 | **CLAUDE.md template** | `templates/CLAUDE.md.template` | Standard rules + label table + SOP activation table |
 | **Validators** | `engine/validators/` | Pre-commit / CI structural checks for CLAUDE.md sections + GitHub label hygiene |
-| **SOPs** | `sops/` | Nine generic SOPs (dev-pipeline, versioning, worktree, design-process, retrospective, new-repo-pattern, pr-review, brainstorming-and-review, autonomous-work) |
+| **SOPs** | `sops/` | Ten generic SOPs (dev-pipeline, versioning, worktree, design-process, retrospective, new-repo-pattern, pr-review, brainstorming-and-review, autonomous-work, in-session-dev-loop) |
 
 ## Install
 
@@ -88,7 +88,7 @@ compass-core/
 ├── claude/
 │   ├── agents/governance.md          # Subagent persona
 │   └── skills/governance/            # Skill + 9 workflows + config schema doc
-├── sops/                             # 9 generic SOPs
+├── sops/                             # 10 generic SOPs
 ├── standards/                        # Schemas + scripts (sync-labels.ts) + labels.example.yaml
 ├── templates/                        # CLAUDE.md + arc-manifest templates
 ├── engine/
