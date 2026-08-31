@@ -1,15 +1,16 @@
 # compass-core
 
-Reusable governance engine for Claude Code projects. Ships SOPs, validators, a governance skill, a governance subagent, and a CLAUDE.md template — installable into any repo via [arc](https://github.com/the-metafactory/arc).
+Reusable governance engine for Claude Code projects. Ships SOPs, validators, a governance skill, a governance subagent, and a CLAUDE.md template. Install it into a target repo with `bun engine/install.ts <dir>`, which renders the SOPs against that repo's config; the package itself is distributed via [arc](https://github.com/the-metafactory/arc).
 
 > **Status:** v0.4.0 — Phase D. SOPs are de-metafactorized (Phase B), validators are parameterized via `compass.config.yaml` (Phase C), and the placeholder grammar is consistent end-to-end (Phase D).
 
 ## What you get
 
-Four governance surfaces, all wired to one config:
+Six governance surfaces, all wired to one config:
 
 | Surface | Where | What it does |
 |---------|-------|-------------|
+| **Installer** | `engine/install.ts` | Renders the SOPs against a target repo's config and installs them into it |
 | **Skill** | `claude/skills/governance/` | Routes process questions to workflows (e.g., "how do I bump the version?") |
 | **Subagent** | `claude/agents/governance.md` | Autonomous governance task execution from another agent |
 | **CLAUDE.md template** | `templates/CLAUDE.md.template` | Standard rules + label table + SOP activation table |
@@ -18,11 +19,54 @@ Four governance surfaces, all wired to one config:
 
 ## Install
 
+Governance follows the code: you install **into a project directory**, and the
+SOPs are rendered against that project's config as they are written.
+
+```bash
+# 1. give the target repo a config
+cp compass.config.example.yaml /path/to/your-repo/compass.config.yaml
+$EDITOR /path/to/your-repo/compass.config.yaml
+
+# 2. install into it
+bun engine/install.ts /path/to/your-repo
+```
+
+That writes two things, and nothing outside the target:
+
+| Path | What |
+|------|------|
+| `<target>/sops/*.md` | the SOPs, **rendered** — real branch pattern, real manifest, real channel |
+| `<target>/CLAUDE.md` | a `<!-- compass-core:begin -->…<!-- compass-core:end -->` block holding the SOP activation table |
+
+The rendering is the point. An installed SOP names your actual values, so no
+generated file tells the model to go and read `compass.config.yaml` at run time
+([#17](https://github.com/the-metafactory/compass-core/issues/17)). The output
+is plain markdown: the target repo needs no bun, no runtime, no toolchain.
+
+**Flags:** `--force` overwrites existing files that differ; `--dry-run` reports
+what would be written and touches nothing.
+
+**It will not surprise you.** Missing config is an error, not a silent install
+with defaults. An existing file that differs is refused per file and reported —
+never overwritten without `--force`, never deleted. An existing `CLAUDE.md` is
+merged, not replaced: only the bytes between the markers change, and re-running
+with unchanged config produces a byte-identical tree.
+
+Exit codes: `0` success; `2` usage; `3` bad target; `4` no config; `5` invalid
+config; `6` unresolved placeholder; `7` refused existing files; `8` malformed
+markers.
+
+### Alternative: the arc package
+
 ```bash
 arc install @the-metafactory/compass-core
 ```
 
-Then create `compass.config.yaml` in your repo root. The simplest possible config:
+This installs the compass-core package itself (engine, standards, templates,
+governance skill). Use it when you want the whole toolkit; use
+`bun engine/install.ts` when you want a repo governed.
+
+Either way, create `compass.config.yaml` in your repo root. The simplest possible config:
 
 ```yaml
 schema: compass-config/v1
@@ -92,7 +136,8 @@ compass-core/
 ├── standards/                        # Schemas + scripts (sync-labels.ts) + labels.example.yaml
 ├── templates/                        # CLAUDE.md + arc-manifest templates
 ├── engine/
-│   ├── lib/                          # Shared config loader + tests
+│   ├── install.ts                    # Installer: render SOPs into a target repo
+│   ├── lib/                          # Config loader + install-time renderer + tests
 │   ├── validators/                   # CLAUDE.md + label validators + tests
 │   └── ci/run-all.ts                 # CI runner
 ├── compass.config.example.yaml       # Starter config
@@ -106,7 +151,8 @@ bun install
 bun test
 ```
 
-25 tests covering the config loader (19) and the claude-md validator CLI (6).
+76 tests covering the config loader (19), the claude-md validator CLI (6), the
+install-time renderer (29), and the installer CLI (22).
 
 ## Versioning
 

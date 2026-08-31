@@ -206,6 +206,21 @@ describe("install.ts — fresh install", () => {
     }
   });
 
+  test("the block supplies the Standard Operating Procedures section, not Critical Rules", () => {
+    const dir = target();
+    run([dir]);
+    const claude = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+    expect(claude).toContain("## Standard Operating Procedures");
+    // Deliberate scope line for this cut (compass-core#17 criteria 1-4): the
+    // installed block is the SOP activation table only. It does NOT supply
+    // "## Critical Rules", which templates/CLAUDE.md.template does and which
+    // the default validators.claude_md.required_sections asks for — so a repo
+    // installed with the example config does not yet satisfy claude-md-check
+    // on its own. Pinned here so the gap is visible rather than a surprise;
+    // widening the block is a governance-content decision, not a code fix.
+    expect(claude).not.toContain("## Critical Rules");
+  });
+
   test("creates a CLAUDE.md containing only the block when none exists", () => {
     const dir = target();
     run([dir]);
