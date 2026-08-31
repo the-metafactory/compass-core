@@ -60,18 +60,28 @@ touches nothing.
 bun engine/install.ts /path/to/your-repo --with-ci
 ```
 
-Adds two more files, and changes nothing else — the CLAUDE.md block is a
+Adds three more files, and changes nothing else — the CLAUDE.md block is a
 function of your config alone, identical with or without this flag:
 
 | Path | What |
 |------|------|
 | `<target>/.githooks/pre-commit` | local leak/credential scan over staged changes |
+| `<target>/.githooks/leak-check.ts` | the scanner that hook runs |
 | `<target>/.github/workflows/compass-governance.yml` | PR gate: claude-md-check, label-check, leak-check |
 
 The workflow **checks compass-core out for itself**, pinned to an exact commit,
 and runs the validators from that checkout against your files. Your repo carries
-no engine and needs no bun manifest of its own. Bumping the pin is a deliberate
-edit to that file — read what changed, land it in a PR.
+no engine tree and needs no bun manifest of its own. Bumping the pin is a
+deliberate edit to that file — read what changed, land it in a PR.
+
+The scanner is the one engine file that travels with the install, because the
+local hook has no pinned checkout to lean on: it must run before a commit,
+offline, in a repo that carries no engine. It is copied rather than referenced —
+`leak-check.ts` imports node builtins only, so it starts anywhere `bun` does —
+and it is refused, never overwritten, if you have edited your copy. Earlier
+builds shipped the hook without it; the hook then resolved a path no installed
+repo has, took its fail-open arm, and allowed every commit while scanning
+nothing. If you installed before this fix, re-run with `--with-ci`.
 
 The hook is inert until each clone opts in, which is the one manual step:
 
@@ -107,15 +117,29 @@ Exit codes: `0` success; `2` usage; `3` bad target; `4` no config; `5` invalid
 config; `6` unresolved placeholder; `7` refused existing files; `8` malformed
 markers.
 
-### Alternative: the arc package
+### Getting the package: arc
 
 ```bash
 arc install @the-metafactory/compass-core
+# then, from the repo you want governed:
+bun <store-path>/engine/install.ts <your-repo> [--with-ci]
 ```
 
-This installs the compass-core package itself (engine, standards, templates,
-governance skill). Use it when you want the whole toolkit; use
-`bun engine/install.ts` when you want a repo governed.
+`arc install` **fetches** compass-core into arc's store — engine, standards,
+templates, governance skill. It does not govern a repo, and it no longer writes
+anything into your working directory. `bun engine/install.ts` is the one blessed
+project-install path, and the second line above is not optional if you want a
+repo governed.
+
+It used to be advertised as an alternative, and it behaved worse than that
+description. arc renders a package's declared templates straight into your
+current directory with a bare write — no existence check, no prompt, no backup —
+so `arc install` in a repo that already had a `CLAUDE.md` overwrote it, and
+overwrote it with unrendered `{{config:...}}` placeholders, because arc's
+renderer speaks flat `{KEY}` and these templates do not. The manifest no longer
+declares those templates, so arc has nothing to render. `templates/` still ships
+them for `engine/install.ts` and the `new-repo` workflow, which render them with
+the renderer that does speak their grammar.
 
 Either way, create `compass.config.yaml` in your repo root. The simplest possible config:
 

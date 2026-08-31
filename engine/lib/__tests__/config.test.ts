@@ -153,6 +153,32 @@ extensions:
 });
 
 describe("schema validation", () => {
+  // `schema:` is the one key Zod itself requires. config-schema.md has always
+  // called it Required; until now nothing checked, because the mechanism that
+  // enforces requiredness for every other key — a SOP interpolating
+  // `{{config:key}}`, and the installer aborting when it resolves to nothing —
+  // structurally cannot reach a key that no SOP interpolates. A version
+  // discriminator that may be absent does not discriminate.
+  test("rejects a config with no schema header", () => {
+    writeFileSync(join(tmp, "compass.config.yaml"), "org:\n  name: acme\n");
+    process.chdir(tmp);
+    expect(() => loadConfig()).toThrow(/schema/);
+  });
+
+  test("the rejection tells you what to type, not just that you are wrong", () => {
+    writeFileSync(join(tmp, "compass.config.yaml"), "org:\n  name: acme\n");
+    process.chdir(tmp);
+    expect(() => loadConfig()).toThrow(/schema: compass-config\/v1/);
+  });
+
+  test("an otherwise empty config carrying only the header is valid", () => {
+    // Everything else stays optional — a narrow exception, not a turn toward a
+    // strict schema.
+    writeFileSync(join(tmp, "compass.config.yaml"), "schema: compass-config/v1\n");
+    process.chdir(tmp);
+    expect(loadConfig()?.schema).toBe("compass-config/v1");
+  });
+
   test("rejects non-string element in labels.required.types", () => {
     // 42 is a number — schema should reject with a path pointing at index 1.
     const yaml = `

@@ -68,7 +68,7 @@ describe("claude-md-check.ts — config-driven sections", () => {
     const cfg = join(tmp, "compass.config.yaml");
     writeFileSync(
       cfg,
-      "validators:\n  claude_md:\n    enabled: true\n    required_sections:\n      - Architecture\n      - Naming\n",
+      "schema: compass-config/v1\nvalidators:\n  claude_md:\n    enabled: true\n    required_sections:\n      - Architecture\n      - Naming\n",
     );
     const r = run([claude, "--config", cfg]);
     expect(r.exitCode).toBe(0);
@@ -81,7 +81,7 @@ describe("claude-md-check.ts — config-driven sections", () => {
     const cfg = join(tmp, "compass.config.yaml");
     writeFileSync(
       cfg,
-      "validators:\n  claude_md:\n    required_sections:\n      - Critical Rules\n      - Architecture\n",
+      "schema: compass-config/v1\nvalidators:\n  claude_md:\n    required_sections:\n      - Critical Rules\n      - Architecture\n",
     );
     const r = run([claude, "--config", cfg]);
     expect(r.exitCode).toBe(1);
@@ -93,7 +93,7 @@ describe("claude-md-check.ts — config-driven sections", () => {
     const claude = join(tmp, "CLAUDE.md");
     writeFileSync(claude, "# Empty\n");
     const cfg = join(tmp, "compass.config.yaml");
-    writeFileSync(cfg, "validators:\n  claude_md:\n    enabled: false\n");
+    writeFileSync(cfg, "schema: compass-config/v1\nvalidators:\n  claude_md:\n    enabled: false\n");
     const r = run([claude, "--config", cfg]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("skipping");

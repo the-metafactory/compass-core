@@ -14,11 +14,32 @@
  * With --with-ci, also:
  *
  *   <target>/.githooks/pre-commit                        the local leak gate
+ *   <target>/.githooks/leak-check.ts                     the scanner it runs
  *   <target>/.github/workflows/compass-governance.yml    the PR gate, rendered
  *
- * Nothing is written outside <target>. engine/, standards/ and the governance
- * skill are NOT copied — the CI workflow checks compass-core out for itself,
- * pinned by SHA, so the governed repo never carries the engine.
+ * Nothing is written outside <target>. standards/ and the governance skill are
+ * NOT copied, and neither is engine/ as a tree — the CI workflow checks
+ * compass-core out for itself, pinned by SHA, so the governed repo never
+ * carries the engine.
+ *
+ * ## Why the scanner is the one engine file that travels
+ *
+ * The local hook has no SHA-pinned checkout to lean on: it must run before a
+ * commit, offline, in a repo that carries no engine. Shipped without its
+ * scanner it resolved `<target>/engine/validators/leak-check.ts`, found
+ * nothing, took its fail-open "SKIPPED, commit allowed" arm, and exited 0 on
+ * every commit in every installed target — armed-looking, never scanning. That
+ * is the defect this copy closes.
+ *
+ * Copying is cheap and safe because leak-check.ts imports node builtins only
+ * (node:util, node:fs, node:path): no package, no relative import, nothing that
+ * ties it to the tree it came from. It is byte-copied, not rendered — it holds
+ * no placeholders and its behaviour must not vary by target — and it
+ * participates in non-clobber and idempotency like every other written file.
+ *
+ * CI still does NOT use this copy: the workflow runs the validators out of its
+ * own pinned .compass-engine checkout, so the gate a PR faces is the reviewed
+ * engine rather than whatever a target happens to carry.
  *
  * ## Why the CI gate is opt-in and the CLAUDE.md block is not flag-dependent
  *
@@ -40,8 +61,11 @@
  *
  * ## The unresolvable-placeholder rule
  *
- * Every field is optional in the Zod schema, so "required" means required by
- * `claude/skills/governance/config-schema.md`. For an unset key, in order:
+ * Every field is optional in the Zod schema except `schema:` itself — which is
+ * rejected at load, exit 5, because a version discriminator no one interpolates
+ * cannot be caught by the render-time gate below. For everything else,
+ * "required" means required by `claude/skills/governance/config-schema.md`, and
+ * is enforced here. For an unset key, in order:
  *
  *   1. an inline `{{config:key|fallback}}` in the source wins;
  *   2. a key with a documented default renders that default, and the run
@@ -96,6 +120,7 @@ import { buildClaudeBlock, mergeClaudeMd, renderText } from "./lib/render.ts";
 const PACKAGE_ROOT = resolve(import.meta.dir, "..");
 const SOURCE_SOPS = join(PACKAGE_ROOT, "sops");
 const SOURCE_HOOK = join(PACKAGE_ROOT, ".githooks", "pre-commit");
+const SOURCE_SCANNER = join(PACKAGE_ROOT, "engine", "validators", "leak-check.ts");
 const SOURCE_WORKFLOW = join(PACKAGE_ROOT, "templates", "workflows", "compass-governance.yml");
 
 /**
@@ -263,6 +288,16 @@ function main(): void {
       mode: 0o755,
     });
 
+    // The scanner the hook runs, copied in beside it. Without this the hook
+    // resolves a path no installed target has and fails open on every commit.
+    // Byte-copied, not rendered: it carries no placeholders, and a scanner
+    // whose rules varied by target would be a gate nobody could reason about.
+    // No execute bit — the hook invokes it as `bun <path>`, never as a program.
+    rendered.push({
+      rel: join(".githooks", "leak-check.ts"),
+      contents: readFileSync(SOURCE_SCANNER, "utf8"),
+    });
+
     // The workflow carries the compass-core pin, and is run through the config
     // renderer too so a future {{config:...}} in it resolves like anything else.
     const workflowSource = readFileSync(SOURCE_WORKFLOW, "utf8");
@@ -382,10 +417,16 @@ function main(): void {
 
   if (withCi) {
     console.log(`  CI gate: pinned to compass-core ${ENGINE_REF.slice(0, 12)}`);
+    console.log("  local gate: .githooks/pre-commit runs .githooks/leak-check.ts,");
+    console.log("              copied in beside it — the hook needs no engine checkout.");
     console.log("");
     console.log("  The pre-commit hook is inert until this clone opts in. Once per clone:");
     console.log("");
     console.log("      git config core.hooksPath .githooks");
+    console.log("");
+    console.log("  Verify it is live before you trust it — stage a throwaway file holding");
+    console.log("  a fake AKIA-shaped key and confirm the commit is REFUSED. A hook that");
+    console.log("  prints nothing and lets the commit through has not scanned anything.");
     console.log("");
     console.log("  Optionally point it at an operator pattern file (plaintext regexes,");
     console.log("  one per line, kept OUTSIDE the repo):");
