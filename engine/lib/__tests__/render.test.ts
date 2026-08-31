@@ -129,6 +129,89 @@ describe("renderText — optional keys (the team-channel rule)", () => {
   });
 });
 
+describe("renderText — a deleted parenthetical subsumes what is inside it", () => {
+  // The reviewer's exact probe for F-A1. Before the fix this rendered
+  // "post it (to {{config:channels.team}} in acme-corp) now" with no
+  // unresolved entry: a live placeholder shipped into a target repo at exit 0,
+  // violating the whole point of install-time rendering.
+  test("an unset optional key takes the whole parenthetical, resolvable keys and all", () => {
+    const r = renderText(
+      "post it (to {{config:channels.team}} in {{config:org.name}}) now",
+      MINIMAL,
+    );
+    expect(r.text).toBe("post it now");
+    expect(r.text).not.toContain("{{config:");
+  });
+
+  test("the same line renders normally when the optional key IS set", () => {
+    const r = renderText(
+      "post it (to {{config:channels.team}} in {{config:org.name}}) now",
+      FULL,
+    );
+    expect(r.text).toBe("post it (to #eng-internal in acme-corp) now");
+  });
+
+  test("a resolvable placeholder outside the dropped parenthetical still renders", () => {
+    const r = renderText(
+      "{{config:org.name}} posts (to {{config:channels.team}}) daily",
+      MINIMAL,
+    );
+    expect(r.text).toBe("acme-corp posts daily");
+  });
+
+  test("two parentheticals on one line drop independently", () => {
+    const r = renderText(
+      "a (x {{config:channels.team}}) b (y {{config:channels.public}}) c",
+      MINIMAL,
+    );
+    expect(r.text).toBe("a b c");
+  });
+});
+
+describe("renderText — an empty config value is not a value", () => {
+  // F-A2. `org.name: ""` used to render "gh repo create /{repo-name}" at
+  // exit 0. An empty string is an unfilled field, not an answer.
+  test("an empty required value falls through to unresolved, not a blank", () => {
+    const cfg = { ...MINIMAL, org: { ...MINIMAL.org, name: "" } } as CompassConfig;
+    const r = renderText("gh repo create {{config:org.name}}/{repo}", cfg);
+    expect(r.unresolved).toContain("org.name");
+    expect(r.text).not.toBe("gh repo create /{repo}");
+  });
+
+  test("a whitespace-only value is also treated as unset", () => {
+    const cfg = { ...MINIMAL, org: { ...MINIMAL.org, name: "   " } } as CompassConfig;
+    expect(renderText("{{config:org.name}}", cfg).unresolved).toContain("org.name");
+  });
+
+  test("an empty optional value drops instead of rendering empty backticks", () => {
+    const cfg = { ...MINIMAL, channels: { team: "" } } as CompassConfig;
+    const r = renderText("to the team channel (`{{config:channels.team|}}`): x", cfg);
+    expect(r.text).toBe("to the team channel: x");
+  });
+
+  test("an empty optional value outside a parenthetical uses the documented phrase", () => {
+    const cfg = { ...MINIMAL, channels: { team: "" } } as CompassConfig;
+    const r = renderText("| Report: {{config:channels.team}} | x", cfg);
+    expect(r.text).toBe("| Report: the team channel | x");
+  });
+
+  test("an empty value for a defaulted key falls back to the documented default", () => {
+    const cfg = { ...MINIMAL, org: { ...MINIMAL.org, default_branch: "" } } as CompassConfig;
+    const r = renderText("Base: {{config:org.default_branch}}", cfg);
+    expect(r.text).toBe("Base: main");
+    expect(r.defaulted).toContain("org.default_branch");
+  });
+
+  test("an empty array is treated as unset", () => {
+    const cfg = {
+      ...MINIMAL,
+      labels: { source: "standards/labels.yaml", required: { types: [] } },
+    } as CompassConfig;
+    const r = renderText("Types: {{config:labels.required.types}}", cfg);
+    expect(r.text).toBe("Types: bug, documentation, feature, infrastructure");
+  });
+});
+
 describe("renderText — inline fallback grammar", () => {
   test("uses the SOP-supplied fallback when the key is unset", () => {
     const r = renderText("Ping {{config:channels.team|your team channel}}.", MINIMAL);
@@ -138,6 +221,19 @@ describe("renderText — inline fallback grammar", () => {
   test("prefers the configured value over the inline fallback", () => {
     const r = renderText("Ping {{config:channels.team|your team channel}}.", FULL);
     expect(r.text).toBe("Ping #eng-internal.");
+  });
+
+  test("an inline fallback beats a documented default", () => {
+    // Precedence: the SOP author's phrasing outranks the schema default.
+    const r = renderText("Base: {{config:org.default_branch|the mainline}}", MINIMAL);
+    expect(r.text).toBe("Base: the mainline");
+    expect(r.defaulted).not.toContain("org.default_branch");
+  });
+
+  test("an inline fallback rescues a key that would otherwise be unresolved", () => {
+    const r = renderText("{{config:org.name|your-org}}/repo", {} as CompassConfig);
+    expect(r.text).toBe("your-org/repo");
+    expect(r.unresolved).toEqual([]);
   });
 
   test("an empty inline fallback drops the enclosing parenthetical", () => {

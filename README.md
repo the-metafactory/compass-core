@@ -155,8 +155,8 @@ bun install
 bun test
 ```
 
-78 tests covering the config loader (19), the claude-md validator CLI (6), the
-install-time renderer (29), and the installer CLI (24).
+94 tests covering the config loader (19), the claude-md validator CLI (6), the
+install-time renderer (41), and the installer CLI (28).
 
 ## Versioning
 

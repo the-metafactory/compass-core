@@ -130,13 +130,29 @@ export interface RenderResult {
   verbatim: string[];
 }
 
-/** Look a dotted path up in the config. Returns undefined when absent or null. */
+/**
+ * Look a dotted path up in the config. Returns undefined when the key is
+ * absent, null, or *present but empty*.
+ *
+ * An empty value is treated as unset so it falls into the four-step resolution
+ * chain rather than rendering a hole. `org.name: ""` must not quietly produce
+ * `gh repo create /{repo-name}`; `channels.team: ""` must not produce an empty
+ * backtick parenthetical. This matches how config.ts treats an empty
+ * COMPASS_CONFIG, and it is what rule 5 of this module's header already
+ * promised: we never ship a blank where a value belongs.
+ *
+ * Emptiness is judged on a trimmed copy; the value itself renders as authored.
+ */
 function lookup(config: CompassConfig, key: string): unknown {
   let node: unknown = config;
   for (const part of key.split(".")) {
     if (node === null || typeof node !== "object" || Array.isArray(node)) return undefined;
     node = (node as Record<string, unknown>)[part];
     if (node === undefined || node === null) return undefined;
+  }
+  if (typeof node === "string" && node.trim() === "") return undefined;
+  if (Array.isArray(node) && node.filter((v) => String(v).trim() !== "").length === 0) {
+    return undefined;
   }
   return node;
 }
@@ -227,22 +243,30 @@ function renderLine(line: string, config: CompassConfig, out: RenderResult): str
     record(out.unresolved, key);
   }
 
-  for (const index of parenDeletions) {
+  // A deleted parenthetical subsumes every edit inside it. Drop those edits
+  // here, at construction, so the surviving spans cannot overlap. Deciding
+  // subsumption while *applying* right-to-left got this backwards: the inner
+  // edit sorted first, applied, and then the enclosing deletion was skipped
+  // for overlapping it — which shipped a live `{{config:...}}` into a rendered
+  // SOP whenever an unset optional key shared a parenthetical with a
+  // resolvable one. Overlap is a construction-time concern, not an
+  // application-time one.
+  const deletions = [...parenDeletions].map((index) => {
     const span = parens[index]!;
     // Absorb one preceding space so "team (`#x`) only" closes to "team only".
     const start = span.start > 0 && line[span.start - 1] === " " ? span.start - 1 : span.start;
-    edits.push({ start, end: span.end, replacement: "" });
-  }
+    return { start, end: span.end, replacement: "" };
+  });
 
-  // Apply right-to-left so earlier offsets stay valid. Paren deletions subsume
-  // the placeholder edits inside them.
-  edits.sort((a, b) => b.start - a.start);
+  const surviving = edits.filter(
+    (edit) => !deletions.some((d) => d.start <= edit.start && d.end >= edit.end),
+  );
+
+  // Apply right-to-left so earlier offsets stay valid.
+  const final = [...deletions, ...surviving].sort((a, b) => b.start - a.start);
   let result = line;
-  let lastStart = Infinity;
-  for (const edit of edits) {
-    if (edit.end > lastStart) continue; // covered by an outer edit already applied
+  for (const edit of final) {
     result = result.slice(0, edit.start) + edit.replacement + result.slice(edit.end);
-    lastStart = edit.start;
   }
   return result;
 }
