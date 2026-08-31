@@ -1,0 +1,68 @@
+# compass governance — PR gate template.
+#
+# TEMPLATE. Copy to .github/workflows/compass-governance.yml in the consuming
+# repo (the installer does this; nothing runs from templates/).
+#
+# It assumes the governance engine is installed at the repo root, so that
+# engine/validators/*.ts resolve. If it lives elsewhere, adjust the paths below.
+#
+# Optional: set a repository or organisation secret named CONFIDENTIALITY_DENYLIST
+# holding the operator pattern file's contents (one regex per line). Without it,
+# leak-check runs its built-in rules only. Secrets are not exposed to fork PRs,
+# so a fork run is always built-ins-only — see sops/confidentiality-gate.md §5 for
+# the local-gate step a maintainer owes a fork PR before merging.
+
+name: compass governance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the leak-check step diffs against the PR base.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: claude-md-check
+        run: bun engine/validators/claude-md-check.ts CLAUDE.md
+
+      - name: label-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun engine/validators/label-check.ts "${{ github.repository }}"
+
+      - name: leak-check (changed files)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DENYLIST: ${{ secrets.CONFIDENTIALITY_DENYLIST }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$DENYLIST" ]; then
+            printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
+            export CONFIDENTIALITY_DENYLIST="$RUNNER_TEMP/denylist.txt"
+          else
+            echo "::notice::CONFIDENTIALITY_DENYLIST is not available to this run — built-in rules only."
+          fi
+
+          git diff --name-only --diff-filter=ACM "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+
+          if [ ! -s "$RUNNER_TEMP/changed.txt" ]; then
+            echo "No added or modified files in this PR — nothing to scan."
+            exit 0
+          fi
+
+          xargs -a "$RUNNER_TEMP/changed.txt" -d '\n' bun engine/validators/leak-check.ts
