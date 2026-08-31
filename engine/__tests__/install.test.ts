@@ -320,6 +320,15 @@ describe("install.ts — optional placeholder rendering", () => {
     expect(out).not.toContain("{{config:channels.team}}");
   });
 
+  test("a resolved channel reads as a statement, not a hedge", () => {
+    const dir = target();
+    run([dir]);
+    const out = readFileSync(join(dir, "sops", "autonomous-work.md"), "utf8");
+    expect(out).toContain("to the team channel (`#eng-internal`)");
+    // "if configured" is model-time hedging: once rendered, it IS configured.
+    expect(out).not.toContain("if configured");
+  });
+
   test("team channel UNSET still renders — no placeholder, no empty parenthetical", () => {
     const dir = target(NO_CHANNELS_CONFIG);
     const r = run([dir]);

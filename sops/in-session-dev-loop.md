@@ -70,7 +70,7 @@ The running, honest narrative to the team channel is a **first-class deliverable
 - **Show the review-loop working.** *"Review caught a real one — before any live run"* is the strongest thing you can post. Surface the catch, the blast radius it prevented, and that no live system was touched.
 - **Close the feedback loop with the reporter.** Thank whoever reported it, and when it ships, **ping them for a retest**. The loop is: report → precise gap → fix via review → ship → retest.
 - **Cadence:** roughly one post per **state change** — opening (gap pinned, fixing now) → progress (N of M merged) → shipped (vX.Y.Z) → retest ping. Not one per commit; not silence until done.
-- **Channel and safety discipline:** the dev narrative goes to the **internal team** channel (`{{config:channels.team}}` if configured). An outward-facing community channel (`{{config:channels.public}}`) is per-post sign-off only, public-safe copy, **no personal data or secrets, no internal identifiers**. The running story belongs in chat; the durable record — PR, review, decision — belongs on the git host.
+- **Channel and safety discipline:** the dev narrative goes to the **internal team** channel (`{{config:channels.team|}}`). An outward-facing community channel (`{{config:channels.public}}`) is per-post sign-off only, public-safe copy, **no personal data or secrets, no internal identifiers**. The running story belongs in chat; the durable record — PR, review, decision — belongs on the git host.
 
 ## 6. Discipline rails
 
