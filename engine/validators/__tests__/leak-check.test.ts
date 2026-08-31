@@ -158,11 +158,27 @@ describe("leak-check.ts — built-in rules", () => {
     expect(r.output).toContain("leak.txt:1");
   });
 
-  test("skips binary files", () => {
+  test("skips binary files, and says how many it skipped", () => {
     const p = join(tmp, "blob.bin");
     writeFileSync(p, Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff]));
     const r = run([p]);
     expect(r.exitCode).toBe(0);
+    // A silent skip is a hiding place — the count has to be visible.
+    expect(r.stdout).toContain("1 binary/oversize file(s) NOT scanned");
+  });
+
+  test("a placeholder-ish prefix does not swallow a real credential", () => {
+    // `my-api-key` is a stand-in; `mysecretvalue123` is a password that merely
+    // starts with the same two letters. Only the first should be suppressed.
+    // Written as a join so this source line itself ends at the closing quote —
+    // an inline "\n" would leave the escape inside the value and self-flag.
+    const stand = write("stand-in.yml", ["api_key: my-api-key-here", ""].join("\n"));
+    expect(run([stand]).exitCode).toBe(0);
+
+    const real = write("real.yml", `password: my${FAKE.credential}\n`);
+    const r = run([real]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
   });
 });
 

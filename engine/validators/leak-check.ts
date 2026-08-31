@@ -96,8 +96,12 @@ const RULES: Rule[] = [
  * `credential-assignment` rule, too tight and the rule cries wolf until someone
  * deletes the hook.
  */
+// Note the `[-_]` after your/my/sample/fake/example: those words only mean
+// "placeholder" when they head a hyphenated stand-in (`your-api-key`,
+// `my_token_here`). Without the separator the alternation is greedy enough to
+// swallow real secrets — `mysecretvalue123` would suppress itself.
 const PLACEHOLDER =
-  /^(?:x+|\*+|\.+|-+|_+|change[-_ ]?me|redacted|placeholder|unset|example|dummy|fake|test|todo|tbd|none|null|nil|true|false|undefined|empty|your[-_a-z0-9]*|sample[-_a-z0-9]*|my[-_a-z0-9]*|secret|password|token)$/i;
+  /^(?:x+|\*+|\.+|-+|_+|change[-_ ]?me|redacted|placeholder|unset|dummy|test|todo|tbd|none|null|nil|true|false|undefined|empty|secret|password|token|(?:your|my|sample|fake|example|dummy|replace)[-_][a-z0-9_-]*)$/i;
 
 function isPlaceholder(value: string): boolean {
   const v = value.trim();
@@ -115,6 +119,13 @@ interface Finding {
   line: number;
   rule: string;
 }
+
+/**
+ * Files the scanner declined to read (binary, or over the size cap). Counted and
+ * surfaced in the summary — a silently skipped file is a hiding place, and a
+ * reader deserves to know the number is not zero.
+ */
+let skipped = 0;
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -225,10 +236,14 @@ function readTarget(path: string, display: string): Target | null {
   const st = statSync(path);
   if (st.size > MAX_BYTES) {
     console.error(`leak-check: skipped ${display} — larger than ${MAX_BYTES} bytes, not scanned.`);
+    skipped++;
     return null;
   }
   const buf = readFileSync(path);
-  if (looksBinary(buf)) return null;
+  if (looksBinary(buf)) {
+    skipped++;
+    return null;
+  }
   return { display, text: buf.toString("utf8") };
 }
 
@@ -268,9 +283,13 @@ function stagedTargets(): Target[] {
     const buf = Buffer.from(blob.stdout);
     if (buf.length > MAX_BYTES) {
       console.error(`leak-check: skipped ${name} — larger than ${MAX_BYTES} bytes, not scanned.`);
+      skipped++;
       continue;
     }
-    if (looksBinary(buf)) continue;
+    if (looksBinary(buf)) {
+      skipped++;
+      continue;
+    }
     targets.push({ display: name, text: buf.toString("utf8") });
   }
   return targets;
@@ -321,9 +340,10 @@ for (const target of targets) {
 // ---------------------------------------------------------------------------
 
 const ruleSummary = `${RULES.length} built-in rule(s) + ${operatorRules.length} operator pattern(s)`;
+const skipNote = skipped > 0 ? `, ${skipped} binary/oversize file(s) NOT scanned` : "";
 
 if (findings.length === 0) {
-  console.log(`leak-check: clean — ${targets.length} file(s) scanned, ${ruleSummary} active.`);
+  console.log(`leak-check: clean — ${targets.length} file(s) scanned${skipNote}, ${ruleSummary} active.`);
   process.exit(EXIT_CLEAN);
 }
 
@@ -334,6 +354,6 @@ for (const f of findings) {
 console.error(
   `\nleak-check: ${findings.length} finding(s) in ${files.size} file(s) — matched content withheld by design.`,
 );
-console.error(`Scanned ${targets.length} file(s) with ${ruleSummary}.`);
+console.error(`Scanned ${targets.length} file(s)${skipNote} with ${ruleSummary}.`);
 console.error("Open each location yourself. Do not paste the matched text into a PR, an issue, or a chat.");
 process.exit(EXIT_FINDINGS);
