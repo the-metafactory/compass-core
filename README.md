@@ -1,28 +1,123 @@
 # compass-core
 
-Reusable governance engine for Claude Code projects. Ships SOPs, validators, a governance skill, a governance subagent, and a CLAUDE.md template — installable into any repo via [arc](https://github.com/the-metafactory/arc).
+Reusable governance engine for Claude Code projects. Ships SOPs, validators, a governance skill, a governance subagent, and a CLAUDE.md template. Install it into a target repo with `bun engine/install.ts <dir>`, which renders the SOPs against that repo's config; the package itself is distributed via [arc](https://github.com/the-metafactory/arc).
 
 > **Status:** v0.4.0 — Phase D. SOPs are de-metafactorized (Phase B), validators are parameterized via `compass.config.yaml` (Phase C), and the placeholder grammar is consistent end-to-end (Phase D).
 
 ## What you get
 
-Four governance surfaces, all wired to one config:
+Six governance surfaces, all wired to one config:
 
 | Surface | Where | What it does |
 |---------|-------|-------------|
+| **Installer** | `engine/install.ts` | Renders the SOPs against a target repo's config and installs them into it |
 | **Skill** | `claude/skills/governance/` | Routes process questions to workflows (e.g., "how do I bump the version?") |
 | **Subagent** | `claude/agents/governance.md` | Autonomous governance task execution from another agent |
 | **CLAUDE.md template** | `templates/CLAUDE.md.template` | Standard rules + label table + SOP activation table |
-| **Validators** | `engine/validators/` | Pre-commit / CI structural checks for CLAUDE.md sections + GitHub label hygiene |
+| **Validators** | `engine/validators/` | CLAUDE.md sections, GitHub label hygiene, and a leak/credential scanner |
+| **CI gates** | `.githooks/`, `templates/workflows/` | Pre-commit hook + PR workflow, installed with `--with-ci` |
 | **SOPs** | `sops/` | Twelve generic SOPs (dev-pipeline, versioning, worktree, design-process, retrospective, new-repo-pattern, pr-review, brainstorming-and-review, autonomous-work, in-session-dev-loop, plan-breakdown, confidentiality-gate) |
 
 ## Install
+
+Governance follows the code: you install **into a project directory**, and the
+SOPs are rendered against that project's config as they are written.
+
+```bash
+# 1. give the target repo a config
+cp compass.config.example.yaml /path/to/your-repo/compass.config.yaml
+$EDITOR /path/to/your-repo/compass.config.yaml
+
+# 2. install into it
+bun engine/install.ts /path/to/your-repo
+```
+
+That writes two things, and nothing outside the target:
+
+| Path | What |
+|------|------|
+| `<target>/sops/*.md` | the SOPs, **rendered** — real branch pattern, real manifest, real channel |
+| `<target>/CLAUDE.md` | a `<!-- compass-core:begin -->…<!-- compass-core:end -->` block: critical rules, then the SOP activation table, then your repo-specific values |
+
+With `--with-ci`, two more — see [CI gates](#ci-gates---with-ci).
+
+The rendering is the point. An installed SOP names your actual values, so no
+generated file tells the model to go and read `compass.config.yaml` at run time
+([#17](https://github.com/the-metafactory/compass-core/issues/17)). The output
+is plain markdown: the target repo needs no bun, no runtime, no toolchain.
+
+The block also carries the four generic critical rules, so an installed repo
+passes compass-core's own `claude-md-check` out of the box — the installer and
+the validator agree on what "governed" looks like.
+
+**Flags:** `--with-ci` also installs the CI gates (below); `--force` overwrites
+existing files that differ; `--dry-run` reports what would be written and
+touches nothing.
+
+### CI gates: `--with-ci`
+
+```bash
+bun engine/install.ts /path/to/your-repo --with-ci
+```
+
+Adds two more files, and changes nothing else — the CLAUDE.md block is a
+function of your config alone, identical with or without this flag:
+
+| Path | What |
+|------|------|
+| `<target>/.githooks/pre-commit` | local leak/credential scan over staged changes |
+| `<target>/.github/workflows/compass-governance.yml` | PR gate: claude-md-check, label-check, leak-check |
+
+The workflow **checks compass-core out for itself**, pinned to an exact commit,
+and runs the validators from that checkout against your files. Your repo carries
+no engine and needs no bun manifest of its own. Bumping the pin is a deliberate
+edit to that file — read what changed, land it in a PR.
+
+The hook is inert until each clone opts in, which is the one manual step:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Optionally point the scanner at an operator pattern file (plaintext regexes, one
+per line) kept **outside** the repo, so the guard is shared but your sensitive
+strings never are:
+
+```bash
+export CONFIDENTIALITY_DENYLIST_FILE="$HOME/.config/compass/denylist.txt"
+```
+
+The variable ends in `_FILE` because it holds a path. `CONFIDENTIALITY_DENYLIST`
+without the suffix is the org secret from `sops/confidentiality-gate.md`, which
+carries a hashed payload — a different contract that this repo does not
+implement. Sharing one name across both used to produce a silent fail-open.
+
+In CI the scanner runs with `--require-patterns` whenever a denylist is
+available, so a degraded gate fails rather than reporting green. The local hook
+deliberately stays warn-and-continue: a hook that blocks every commit for an
+unrelated reason gets deleted, and a deleted hook protects nothing.
+
+**It will not surprise you.** Missing config is an error, not a silent install
+with defaults. An existing file that differs is refused per file and reported —
+never overwritten without `--force`, never deleted. An existing `CLAUDE.md` is
+merged, not replaced: only the bytes between the markers change, and re-running
+with unchanged config produces a byte-identical tree.
+
+Exit codes: `0` success; `2` usage; `3` bad target; `4` no config; `5` invalid
+config; `6` unresolved placeholder; `7` refused existing files; `8` malformed
+markers.
+
+### Alternative: the arc package
 
 ```bash
 arc install @the-metafactory/compass-core
 ```
 
-Then create `compass.config.yaml` in your repo root. The simplest possible config:
+This installs the compass-core package itself (engine, standards, templates,
+governance skill). Use it when you want the whole toolkit; use
+`bun engine/install.ts` when you want a repo governed.
+
+Either way, create `compass.config.yaml` in your repo root. The simplest possible config:
 
 ```yaml
 schema: compass-config/v1
@@ -57,7 +152,10 @@ bun engine/validators/claude-md-check.ts CLAUDE.md
 # Check a GitHub repo has the required labels
 bun engine/validators/label-check.ts owner/repo
 
-# Run both at once
+# Scan a tree for credential shapes and operator-defined terms
+bun engine/validators/leak-check.ts .
+
+# Run all three at once
 bun engine/ci/run-all.ts . owner/repo
 ```
 
@@ -92,7 +190,8 @@ compass-core/
 ├── standards/                        # Schemas + scripts (sync-labels.ts) + labels.example.yaml
 ├── templates/                        # CLAUDE.md + arc-manifest templates
 ├── engine/
-│   ├── lib/                          # Shared config loader + tests
+│   ├── install.ts                    # Installer: render SOPs into a target repo
+│   ├── lib/                          # Config loader + install-time renderer + tests
 │   ├── validators/                   # CLAUDE.md + label validators + tests
 │   └── ci/run-all.ts                 # CI runner
 ├── compass.config.example.yaml       # Starter config
@@ -106,7 +205,9 @@ bun install
 bun test
 ```
 
-25 tests covering the config loader (19) and the claude-md validator CLI (6).
+142 tests covering the config loader (19), the claude-md validator CLI (6), the
+leak-check scanner (33), the install-time renderer (41), and the installer CLI
+(43).
 
 ## Versioning
 

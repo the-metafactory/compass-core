@@ -1,0 +1,168 @@
+# compass governance — PR gate template.
+#
+# TEMPLATE. `bun engine/install.ts <dir> --with-ci` renders this into
+# .github/workflows/compass-governance.yml in the consuming repo. Nothing runs
+# from templates/.
+#
+# THE CONSUMING REPO DOES NOT CONTAIN THE ENGINE
+# -----------------------------------------------
+# Earlier revisions of this template ran `bun engine/validators/*.ts` against
+# the checkout, which only ever worked inside compass-core itself: a consuming
+# repo installs rendered SOPs and a CLAUDE.md block, not engine/. The same
+# mistake made `bun install --frozen-lockfile` install the CONSUMER's
+# dependencies and then expect compass-core's.
+#
+# So this workflow checks compass-core out separately, into ./.compass-engine,
+# installs ITS dependencies there, and runs the validators from that checkout
+# against the files of the repo being gated. The consuming repo needs no engine,
+# no bun manifest, and no toolchain of its own — only that CI can fetch two
+# public repos.
+#
+# THE PIN IS RENDERED AT INSTALL TIME, AND YOURS TO BUMP
+# ------------------------------------------------------
+# The compass-core checkout is pinned to an exact commit, written in by the
+# installer. That is deliberate: a governance gate that silently follows
+# someone else's main is not a gate. Upgrading is an edit to this file — bump
+# the SHA, read what changed, land it in a PR like any other change. Re-running
+# the installer from a newer compass-core re-renders the pin.
+#
+# CONFIDENTIALITY_DENYLIST_FILE — READ THIS BEFORE WIRING THE SECRET
+# -------------------------------------------------------------------
+# The scanner's variable was renamed from CONFIDENTIALITY_DENYLIST, which is
+# the name sops/confidentiality-gate.md (§0, §2) gives an org secret carrying
+# the HASHED denylist payload, consumed by a gate engine that also reads a
+# pepper secret. This repo implements only the SOP's PLAINTEXT "local gate"
+# tier: leak-check wants a file of plaintext regexes, one per line. One name
+# across two contracts was a fail-open, not a wart — a SOP-shaped hashed
+# payload fed to the old name produced "pattern file not found", a warning, and
+# exit 0, green on exactly the terms the operator meant to guard. The SOP keeps
+# CONFIDENTIALITY_DENYLIST for its payload; the scanner reads
+# CONFIDENTIALITY_DENYLIST_FILE, a path.
+#
+# The GitHub *secret* below is still whatever your org named it, and this job
+# treats its contents as PLAINTEXT regexes. Wire the hashed payload into it and
+# you get a readable file of hashes: every line a valid regex matching nothing.
+# --require-patterns will not save you there — it catches an absent or
+# unreadable file, not a well-formed file of the wrong kind.
+#
+# --require-patterns IS THE CI DEFAULT
+# -------------------------------------
+# Set below, on purpose. In CI a missing pattern file means the gate is running
+# degraded, and a degraded security gate reporting green is worse than a red
+# one. The local pre-commit hook deliberately does NOT do this — see the
+# FAIL-OPEN note in .githooks/pre-commit: a hook that bricks every commit for a
+# reason unrelated to the commit gets deleted, and a deleted hook protects
+# nothing. Different blast radius, different default.
+#
+# Arm the local hook once per clone:  git config core.hooksPath .githooks
+#
+# Secrets are not exposed to fork PRs, so a fork run is always built-ins-only —
+# see sops/confidentiality-gate.md §5 for the local-gate step a maintainer owes
+# a fork PR before merging. That is also why --require-patterns is applied only
+# when a denylist is actually available: a fork PR must run reduced, not fail.
+#
+# Actions and the engine checkout are pinned by commit SHA, not tag. A tag is
+# mutable; a security gate that a consumer copies should not be re-pointable by
+# whoever can move it.
+
+name: compass governance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo being gated
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history: the leak-check step needs the merge-base of the PR.
+          fetch-depth: 0
+
+      - name: Check out the compass-core engine
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: the-metafactory/compass-core
+          ref: {{template:compass_core_ref}} # compass-core pin, rendered at install time
+          path: .compass-engine
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install engine dependencies
+        working-directory: .compass-engine
+        run: bun install --frozen-lockfile
+
+      - name: claude-md-check
+        run: bun .compass-engine/engine/validators/claude-md-check.ts CLAUDE.md
+
+      - name: label-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun .compass-engine/engine/validators/label-check.ts "${{ github.repository }}"
+
+      - name: leak-check (changed files)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DENYLIST: ${{ secrets.CONFIDENTIALITY_DENYLIST }}
+        run: |
+          set -euo pipefail
+
+          # --require-patterns only when a denylist is actually reachable. A fork
+          # PR gets no secrets by design and must run reduced, not fail; a
+          # non-fork run that HAS the secret must refuse to run degraded.
+          REQUIRE=""
+          if [ -n "$DENYLIST" ]; then
+            printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
+            export CONFIDENTIALITY_DENYLIST_FILE="$RUNNER_TEMP/denylist.txt"
+            REQUIRE="--require-patterns"
+          else
+            echo "::notice::No denylist secret available to this run (fork PR, or the secret is not wired) — built-in rules only."
+          fi
+
+          # Diff from the MERGE-BASE, not the base branch tip. The checkout is the
+          # merge commit, so its files include whatever main has merged in; a
+          # two-dot diff against the base tip lists files only main touched and
+          # fails the PR on somebody else's leak.
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          # --no-renames + R in the filter, deliberately, and both are load-
+          # carrying: without them a rename-plus-edit is reported as a single R
+          # entry, ACM drops it, and the renamed file — secret and all — is never
+          # scanned. Verified: git mv + append a credential produces an EMPTY
+          # ACM listing.
+          git diff --no-renames --name-only --diff-filter=ACMR -z \
+            "$MERGE_BASE" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+
+          # The list names paths as the PR HEAD has them, but the checkout on disk
+          # is the MERGE commit. A file the PR added and the base branch then
+          # deleted is listed and absent — and absent from the merged result too,
+          # so there is nothing to scan and nothing at risk. Drop those, loudly:
+          # leak-check treats a missing path as a usage error, on purpose.
+          # The engine checkout is skipped for the same reason it exists: it is
+          # compass-core's files, not this PR's changes.
+          : > "$RUNNER_TEMP/scan.txt"
+          while IFS= read -r -d '' f; do
+            case "$f" in .compass-engine/*) continue ;; esac
+            if [ -f "$f" ]; then
+              printf '%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
+            else
+              echo "::notice::$f is in the PR diff but not in the merged tree — not scanned."
+            fi
+          done < "$RUNNER_TEMP/changed.txt"
+
+          if [ ! -s "$RUNNER_TEMP/scan.txt" ]; then
+            echo "No added, modified, or renamed files to scan in this PR."
+            exit 0
+          fi
+
+          # NUL-separated throughout: filenames with spaces or newlines survive
+          # intact, and xargs -0 is portable in a way that GNU's -a/-d are not.
+          xargs -0 bun .compass-engine/engine/validators/leak-check.ts $REQUIRE \
+            < "$RUNNER_TEMP/scan.txt"

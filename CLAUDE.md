@@ -15,7 +15,7 @@ Reusable governance engine for Claude Code projects. Ships SOPs, validators, a g
 ## Critical Rules
 
 - This is a **public reusable package**. NEVER add project-specific identifiers (org names, infrastructure paths, secrets locations, internal SOP numbers, vendor names) to any file. All such values must live in consumer-side `compass.config.yaml` and be referenced via `{{config:...}}` placeholders.
-- Before every commit, run the leak audit grep documented in `compass.config.example.yaml`. Zero tolerance for leaks — one hit means rollback the commit, not patch it forward.
+- Before every commit, run the leak scanner: `bun engine/validators/leak-check.ts --staged`. Zero tolerance for leaks — one hit means rollback the commit, not patch it forward.
 - NEVER describe code you haven't read. Use Read/Glob/Grep to verify before making claims.
 - NEVER fabricate file names, class names, or architecture. If unsure, read the source.
 - Fix ALL errors found during type checks, tests, or linting — even if pre-existing. If you see it, fix it.

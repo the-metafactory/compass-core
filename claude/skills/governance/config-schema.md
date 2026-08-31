@@ -203,6 +203,31 @@ All placeholders use dotted notation matching the config key path:
 
 If you see a `{{config:...}}` placeholder in a compass-core file that isn't in this table, it's a bug — file an issue.
 
+### When placeholders are resolved
+
+`bun engine/install.ts <target-dir>` renders every `{{config:...}}` placeholder **at install time**, writing real values into `<target-dir>/sops/*.md`. The installed SOP is the single source of truth: it names your branch pattern, your manifest, your channel. Nothing installed asks the model to read `compass.config.yaml` at run time.
+
+### Fallback grammar
+
+A SOP may supply its own phrasing for a key that a given project leaves unset:
+
+| Form | Key set | Key unset |
+|------|---------|-----------|
+| `{{config:key}}` | the value | resolved by the rule below |
+| `{{config:key\|some phrasing}}` | the value | `some phrasing` |
+| `{{config:key\|}}` | the value | dropped — see step 3 below |
+
+### Resolution rule for an unset key
+
+Every field is optional in the Zod schema, so *required* here means required by this document. In order:
+
+1. **Inline fallback** — if the source supplies `|phrasing`, that wins.
+2. **Documented default** — keys with a default in the tables above render it. The installer **reports** every default it applied; defaults are applied, never applied silently.
+3. **Documented optional** (`channels.team`, `channels.public`, `versioning.deploy_command`) — *drop*: if the placeholder sits inside a parenthetical, the whole parenthetical goes, so "post to the team channel (`#eng`)" closes cleanly to "post to the team channel". Otherwise the key's neutral phrase is substituted ("Report: the team channel"), so prose that needs a noun still reads.
+4. **Anything else** — the install **fails**, naming the key and the files that referenced it, and writes nothing. A SOP with a blank where a branch name belongs is worse than no SOP.
+
+A `{{config:...}}` token whose body is not a dotted key path — the meta-references this document uses when *describing* the grammar — is left verbatim, never treated as a lookup.
+
 ---
 
 ## Template inputs
