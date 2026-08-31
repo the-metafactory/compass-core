@@ -100,9 +100,44 @@ Iteration plans are maintained in **two places**:
 1. **`iterations/iteration-{n}.md`** (or `docs/iteration-*.md`) -- repo artifact. Agents read this to understand what work exists and what's done. Durable record that lives with the code.
 2. **GitHub Issue** -- trackable, commentable, assignable. The collaboration surface where humans discuss progress.
 
-**Both must stay in sync.** When a checkbox is completed, update both the repo file and the GitHub issue. When a new task is discovered during implementation, add it to both.
+**Both must stay in sync.** When a slice is completed, update both the repo file and the GitHub issue. When a new slice is discovered during implementation, add it to both.
 
 The repo file is authoritative for content (agents trust it). The GitHub issue is authoritative for status (who's working on what, comments, links to PRs).
+
+### Umbrella + sub-issues (the pattern)
+
+For any iteration with more than ~3 slices, use the host's native **sub-issues** instead of a flat markdown checkbox list:
+
+```
+Iteration umbrella issue (parent)
+  ├── sub-issue: slice A — feature issue
+  │     └── PR #NNN (closes #{slice-A})
+  ├── sub-issue: slice B — feature issue
+  │     └── PR #NNN
+  └── sub-issue: slice C — feature issue
+        └── PR #NNN
+```
+
+Rules:
+
+- The **iteration umbrella** is the parent issue. Its body links the `iterations/iteration-{n}.md` file and lists the slices (one row per sub-issue).
+- Each **slice** is a real issue, linked as a sub-issue of the umbrella.
+- Each **PR** closes its slice issue (`Closes #N` in the PR body). When the slice issue closes, the parent's sub-issue rollup updates automatically -- no manual checkbox ticking.
+- The **repo iteration file** mirrors the sub-issue list 1:1 with issue numbers, so agents can read it without hitting the API.
+
+Why not flat checkboxes:
+
+- Flat bullets can't be assigned, commented on, or PR-linked. Slices deserve real issues.
+- Native sub-issues give aggregate progress (3/8 done) without manual bookkeeping.
+- A sub-issue can be reassigned, reprioritised, or split without editing the parent's body.
+
+**When to keep flat checkboxes:** small iterations (<=3 slices) where ceremony would exceed the work. Convert to sub-issues the moment a slice grows beyond a single PR.
+
+**Tooling (GitHub):**
+
+- `gh sub-issue` extension (`gh extension install yahsan2/gh-sub-issue`) -- best ergonomics.
+- Native REST: `POST /repos/{owner}/{repo}/issues/{n}/sub_issues` with `sub_issue_id`.
+- Web UI: every issue page has a "Sub-issues" section with an "Add" button.
 
 ---
 

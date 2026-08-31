@@ -16,6 +16,7 @@ SOP: versioning | Current: v{X.Y.Z} from {{config:versioning.manifest}} | Bump: 
 Verify before proceeding:
 - Read `{{config:versioning.manifest}}` to get the current version
 - Determined bump type (patch/minor/major) based on the changes since the last release
+- **Pre-release classification scan:** before creating the release, scan the release title and every PR title that will be rolled into the auto-generated notes (`--generate-notes` composes the changelog from PR titles) for content your project classifies as non-public. A leaked term in a release title ships to every subscriber and to the public release feed. This is a distinct check from any per-PR gate — a per-PR gate never sees the composed release notes.
 
 ---
 
@@ -40,6 +41,31 @@ version: 0.2.0
 ```
 
 Do not track versions anywhere else. Do not use `package.json` version fields as authoritative unless `versioning.manifest` is explicitly set to `package.json`.
+
+### Dual-versioned repos and the consistency gate
+
+Some repos legitimately carry a version in **two** files: the manifest at
+`{{config:versioning.manifest}}` (the release source of truth) **and** a
+`package.json` read by the package manager and by any tool that derives a
+`--version` string from the package. When both exist, they **must declare the
+same version**. The invariant:
+
+- **The manifest is the source of truth.** A repo's `--version` output MUST
+  **derive from `{{config:versioning.manifest}}`**, not from an independently
+  maintained `package.json` field. This is the drift the rule exists to
+  prevent: the manifest says `0.33.0`, `package.json` still says `0.30.5`, and
+  the CLI — which reads `package.json` — reports the stale number to every user
+  who asks it what version they are running.
+- **A version bump updates every version-bearing file.** When you bump the
+  manifest, bump `package.json` in the same commit. Never in a follow-up.
+- **CI enforces equality.** Add a check that fails when a dual-versioned repo's
+  two `version` fields disagree. It must **skip** a repo that is not
+  dual-versioned (one of the files is missing, or one has no `version` field —
+  e.g. a `package.json` that omits it), so it never false-positives on a
+  single-versioned repo.
+
+compass-core does not ship this gate — the check is three lines of shell and
+its correct home is your CI pipeline, next to the validators.
 
 ## Release Workflow
 
@@ -99,4 +125,5 @@ If your tooling provides a deploy command (e.g., `arc upgrade {repo}`), run it a
 - Use `--generate-notes` for auto-generated changelogs.
 - Use `--notes-start-tag` to scope the changelog to changes since the last release.
 - Version bump commits use `chore:` prefix and go directly to the default branch.
+- **If your repo is dual-versioned** (`{{config:versioning.manifest}}` + `package.json`), bump **both** in the same commit, derive any `--version` output from the manifest, and let a CI consistency check enforce that they stay equal.
 - If your org uses a registry, **always update it** when bumping a version. A drifted registry is a stale source of truth and will mislead automation.
