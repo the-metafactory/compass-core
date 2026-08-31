@@ -6,6 +6,15 @@
  *   <repo-path>   Local path to the repo (must contain CLAUDE.md at root)
  *   <owner/repo>  Optional. If provided, runs label-check against this slug.
  *
+ * Runs claude-md-check, label-check (when a slug is given), and leak-check.
+ *
+ * leak-check scans <repo-path> recursively and reads its operator patterns from
+ * CONFIDENTIALITY_DENYLIST_FILE, exactly as it does under the hook and in CI. It
+ * is NOT given --require-patterns here: run-all is the local convenience runner,
+ * and the local posture is warn-and-continue (see .githooks/pre-commit). The CI
+ * workflow template applies --require-patterns itself, where a degraded gate
+ * reporting green is the greater harm.
+ *
  * Exit code is the bitwise OR of all validator exit codes (0 = all pass).
  */
 
@@ -54,6 +63,17 @@ if (ownerRepo) {
   combinedExit |= r.exitCode ?? 1;
 } else {
   console.log("\n(skipping label-check — no owner/repo argument provided)");
+}
+
+// Validator: leak-check — scans the repo tree for credential shapes and any
+// operator patterns. Added after the two above; their behaviour is unchanged.
+console.log("\n→ leak-check");
+{
+  const r = Bun.spawnSync(
+    ["bun", join(import.meta.dir, "..", "validators", "leak-check.ts"), absRepo],
+    { stdout: "inherit", stderr: "inherit" },
+  );
+  combinedExit |= r.exitCode ?? 1;
 }
 
 console.log(`\nDone. Combined exit code: ${combinedExit}`);

@@ -7,6 +7,8 @@
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import {
+  chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -338,6 +340,22 @@ describe("install.ts — idempotency", () => {
     expect(hashTree(dir)).toBe(first);
   });
 
+  test("installing twice with --with-ci is byte-identical", () => {
+    const dir = target();
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    const first = hashTree(dir);
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    expect(hashTree(dir)).toBe(first);
+  });
+
+  test("a --with-ci target re-installed with --with-ci reports nothing to write", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const r = run([dir, "--with-ci"]);
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(r.stdout).toContain("wrote: 0 file(s)");
+  });
+
   test("re-install replaces only the marked block, preserving user bytes", () => {
     const dir = target();
     const above = "# My Project\n\nMy own rules that must survive.\n\n";
@@ -367,6 +385,124 @@ describe("install.ts — idempotency", () => {
 
     expect(run([dir]).exitCode).toBe(EXIT.OK);
     expect(readFileSync(join(dir, "CLAUDE.md"), "utf8")).toBe(once);
+  });
+});
+
+describe("install.ts — --with-ci", () => {
+  const HOOK = join(".githooks", "pre-commit");
+  const WORKFLOW = join(".github", "workflows", "compass-governance.yml");
+
+  test("installs the hook and the workflow", () => {
+    const dir = target();
+    const r = run([dir, "--with-ci"]);
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(existsSync(join(dir, HOOK))).toBe(true);
+    expect(existsSync(join(dir, WORKFLOW))).toBe(true);
+  });
+
+  test("installs neither without the flag", () => {
+    const dir = target();
+    expect(run([dir]).exitCode).toBe(EXIT.OK);
+    expect(existsSync(join(dir, ".githooks"))).toBe(false);
+    expect(existsSync(join(dir, ".github"))).toBe(false);
+  });
+
+  test("the hook is executable — a non-executable hook is one git ignores", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    expect(statSync(join(dir, HOOK)).mode & 0o111).not.toBe(0);
+  });
+
+  test("re-install repairs a hook that lost its execute bit", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    chmodSync(join(dir, HOOK), 0o644);
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    expect(statSync(join(dir, HOOK)).mode & 0o111).not.toBe(0);
+  });
+
+  test("the workflow carries a rendered 40-hex compass-core pin", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const wf = readFileSync(join(dir, WORKFLOW), "utf8");
+    expect(wf).toMatch(/ref: [0-9a-f]{40}\b/);
+  });
+
+  test("no unrendered placeholder token survives into the workflow", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const wf = readFileSync(join(dir, WORKFLOW), "utf8");
+    // `${{ ... }}` is GitHub Actions expression syntax and must survive; a bare
+    // `{{ ... }}` is one of ours that failed to render.
+    for (const m of wf.matchAll(/(.?)\{\{([^}]*)\}\}/g)) {
+      expect(m[1]).toBe("$");
+    }
+  });
+
+  test("the workflow runs the validators from the engine checkout, not the target", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const wf = readFileSync(join(dir, WORKFLOW), "utf8");
+    expect(wf).toContain("repository: the-metafactory/compass-core");
+    expect(wf).toContain("path: .compass-engine");
+    // The consuming repo has no engine/, so a bare `bun engine/...` run line
+    // would be a gate that cannot start.
+    expect(wf).not.toMatch(/run: bun engine\/validators/);
+    expect(wf).toContain("bun .compass-engine/engine/validators/claude-md-check.ts");
+  });
+
+  test("CI defaults to --require-patterns when a denylist is available", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const wf = readFileSync(join(dir, WORKFLOW), "utf8");
+    expect(wf).toContain('REQUIRE="--require-patterns"');
+  });
+
+  test("uses the renamed CONFIDENTIALITY_DENYLIST_FILE for the scanner path", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const wf = readFileSync(join(dir, WORKFLOW), "utf8");
+    expect(wf).toContain('export CONFIDENTIALITY_DENYLIST_FILE=');
+  });
+
+  test("prints the hook arming instruction rather than burying it", () => {
+    const dir = target();
+    const r = run([dir, "--with-ci"]);
+    expect(r.stdout).toContain("git config core.hooksPath .githooks");
+  });
+
+  test("the CLAUDE.md block is byte-identical with and without --with-ci", () => {
+    // Config-determinism: block content is a function of the config alone. If a
+    // flag could change it, a later re-install without that flag would silently
+    // rewrite the block.
+    const a = target();
+    run([a]);
+    const b = target();
+    run([b, "--with-ci"]);
+    expect(readFileSync(join(b, "CLAUDE.md"), "utf8")).toBe(
+      readFileSync(join(a, "CLAUDE.md"), "utf8"),
+    );
+  });
+
+  test("refuses a differing existing hook unless --force", () => {
+    const dir = target();
+    mkdirSync(join(dir, ".githooks"), { recursive: true });
+    writeFileSync(join(dir, HOOK), "#!/bin/sh\n# mine\n");
+
+    const r = run([dir, "--with-ci"]);
+    expect(r.exitCode).toBe(EXIT.REFUSED_EXISTING_FILES);
+    expect(r.stderr).toContain("pre-commit");
+    expect(readFileSync(join(dir, HOOK), "utf8")).toBe("#!/bin/sh\n# mine\n");
+
+    expect(run([dir, "--with-ci", "--force"]).exitCode).toBe(EXIT.OK);
+    expect(readFileSync(join(dir, HOOK), "utf8")).not.toBe("#!/bin/sh\n# mine\n");
+  });
+
+  test("--dry-run writes no CI files", () => {
+    const dir = target();
+    expect(run([dir, "--with-ci", "--dry-run"]).exitCode).toBe(EXIT.OK);
+    expect(existsSync(join(dir, ".githooks"))).toBe(false);
+    expect(existsSync(join(dir, ".github"))).toBe(false);
   });
 });
 

@@ -14,7 +14,8 @@ Six governance surfaces, all wired to one config:
 | **Skill** | `claude/skills/governance/` | Routes process questions to workflows (e.g., "how do I bump the version?") |
 | **Subagent** | `claude/agents/governance.md` | Autonomous governance task execution from another agent |
 | **CLAUDE.md template** | `templates/CLAUDE.md.template` | Standard rules + label table + SOP activation table |
-| **Validators** | `engine/validators/` | Pre-commit / CI structural checks for CLAUDE.md sections + GitHub label hygiene |
+| **Validators** | `engine/validators/` | CLAUDE.md sections, GitHub label hygiene, and a leak/credential scanner |
+| **CI gates** | `.githooks/`, `templates/workflows/` | Pre-commit hook + PR workflow, installed with `--with-ci` |
 | **SOPs** | `sops/` | Twelve generic SOPs (dev-pipeline, versioning, worktree, design-process, retrospective, new-repo-pattern, pr-review, brainstorming-and-review, autonomous-work, in-session-dev-loop, plan-breakdown, confidentiality-gate) |
 
 ## Install
@@ -38,6 +39,8 @@ That writes two things, and nothing outside the target:
 | `<target>/sops/*.md` | the SOPs, **rendered** — real branch pattern, real manifest, real channel |
 | `<target>/CLAUDE.md` | a `<!-- compass-core:begin -->…<!-- compass-core:end -->` block: critical rules, then the SOP activation table, then your repo-specific values |
 
+With `--with-ci`, two more — see [CI gates](#ci-gates---with-ci).
+
 The rendering is the point. An installed SOP names your actual values, so no
 generated file tells the model to go and read `compass.config.yaml` at run time
 ([#17](https://github.com/the-metafactory/compass-core/issues/17)). The output
@@ -47,8 +50,52 @@ The block also carries the four generic critical rules, so an installed repo
 passes compass-core's own `claude-md-check` out of the box — the installer and
 the validator agree on what "governed" looks like.
 
-**Flags:** `--force` overwrites existing files that differ; `--dry-run` reports
-what would be written and touches nothing.
+**Flags:** `--with-ci` also installs the CI gates (below); `--force` overwrites
+existing files that differ; `--dry-run` reports what would be written and
+touches nothing.
+
+### CI gates: `--with-ci`
+
+```bash
+bun engine/install.ts /path/to/your-repo --with-ci
+```
+
+Adds two more files, and changes nothing else — the CLAUDE.md block is a
+function of your config alone, identical with or without this flag:
+
+| Path | What |
+|------|------|
+| `<target>/.githooks/pre-commit` | local leak/credential scan over staged changes |
+| `<target>/.github/workflows/compass-governance.yml` | PR gate: claude-md-check, label-check, leak-check |
+
+The workflow **checks compass-core out for itself**, pinned to an exact commit,
+and runs the validators from that checkout against your files. Your repo carries
+no engine and needs no bun manifest of its own. Bumping the pin is a deliberate
+edit to that file — read what changed, land it in a PR.
+
+The hook is inert until each clone opts in, which is the one manual step:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Optionally point the scanner at an operator pattern file (plaintext regexes, one
+per line) kept **outside** the repo, so the guard is shared but your sensitive
+strings never are:
+
+```bash
+export CONFIDENTIALITY_DENYLIST_FILE="$HOME/.config/compass/denylist.txt"
+```
+
+The variable ends in `_FILE` because it holds a path. `CONFIDENTIALITY_DENYLIST`
+without the suffix is the org secret from `sops/confidentiality-gate.md`, which
+carries a hashed payload — a different contract that this repo does not
+implement. Sharing one name across both used to produce a silent fail-open.
+
+In CI the scanner runs with `--require-patterns` whenever a denylist is
+available, so a degraded gate fails rather than reporting green. The local hook
+deliberately stays warn-and-continue: a hook that blocks every commit for an
+unrelated reason gets deleted, and a deleted hook protects nothing.
 
 **It will not surprise you.** Missing config is an error, not a silent install
 with defaults. An existing file that differs is refused per file and reported —
@@ -105,7 +152,10 @@ bun engine/validators/claude-md-check.ts CLAUDE.md
 # Check a GitHub repo has the required labels
 bun engine/validators/label-check.ts owner/repo
 
-# Run both at once
+# Scan a tree for credential shapes and operator-defined terms
+bun engine/validators/leak-check.ts .
+
+# Run all three at once
 bun engine/ci/run-all.ts . owner/repo
 ```
 
@@ -155,8 +205,9 @@ bun install
 bun test
 ```
 
-94 tests covering the config loader (19), the claude-md validator CLI (6), the
-install-time renderer (41), and the installer CLI (28).
+142 tests covering the config loader (19), the claude-md validator CLI (6), the
+leak-check scanner (33), the install-time renderer (41), and the installer CLI
+(43).
 
 ## Versioning
 

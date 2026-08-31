@@ -49,7 +49,7 @@ function run(args: string[], env: Record<string, string> = {}, cwd = tmp): RunRe
   const proc = Bun.spawnSync(["bun", SCANNER, ...args], {
     // Blank the env var by default so a developer's own denylist never leaks
     // into the test run.
-    env: { ...process.env, CONFIDENTIALITY_DENYLIST: "", ...env },
+    env: { ...process.env, CONFIDENTIALITY_DENYLIST_FILE: "", ...env },
     cwd,
   });
   const stdout = new TextDecoder().decode(proc.stdout);
@@ -241,10 +241,10 @@ describe("leak-check.ts — operator patterns", () => {
     expect(r.output).toContain("doc.md:2");
   });
 
-  test("CONFIDENTIALITY_DENYLIST env var is honoured", () => {
+  test("CONFIDENTIALITY_DENYLIST_FILE env var is honoured", () => {
     const patterns = write("denylist.txt", "AcmeVoltaic\n");
     const f = write("doc.md", "AcmeVoltaic\n");
-    const r = run([f], { CONFIDENTIALITY_DENYLIST: patterns });
+    const r = run([f], { CONFIDENTIALITY_DENYLIST_FILE: patterns });
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain("denylist[1]");
   });
@@ -253,7 +253,7 @@ describe("leak-check.ts — operator patterns", () => {
     const envPatterns = write("env-denylist.txt", "NeverMatchesAnything\n");
     const flagPatterns = write("flag-denylist.txt", "AcmeVoltaic\n");
     const f = write("doc.md", "AcmeVoltaic\n");
-    const r = run([f, "--patterns", flagPatterns], { CONFIDENTIALITY_DENYLIST: envPatterns });
+    const r = run([f, "--patterns", flagPatterns], { CONFIDENTIALITY_DENYLIST_FILE: envPatterns });
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain("denylist[1]");
   });
@@ -276,7 +276,7 @@ describe("leak-check.ts — operator patterns", () => {
 
   test("a missing patterns file warns once and falls back to built-ins", () => {
     const f = write("clean.md", "nothing here\n");
-    const r = run([f], { CONFIDENTIALITY_DENYLIST: join(tmp, "absent.txt") });
+    const r = run([f], { CONFIDENTIALITY_DENYLIST_FILE: join(tmp, "absent.txt") });
     expect(r.exitCode).toBe(0);
     expect(r.stderr).toContain("built-in");
     expect(r.stderr.match(/built-in rules only/g)?.length).toBe(1);
@@ -284,13 +284,13 @@ describe("leak-check.ts — operator patterns", () => {
 
   test("a missing patterns file still fails on a built-in finding", () => {
     const f = write("leak.txt", `${FAKE.awsKeyId}\n`);
-    const r = run([f], { CONFIDENTIALITY_DENYLIST: join(tmp, "absent.txt") });
+    const r = run([f], { CONFIDENTIALITY_DENYLIST_FILE: join(tmp, "absent.txt") });
     expect(r.exitCode).toBe(1);
   });
 
   test("--require-patterns turns a missing patterns file into a usage error", () => {
     const f = write("clean.md", "nothing here\n");
-    const r = run([f, "--require-patterns"], { CONFIDENTIALITY_DENYLIST: join(tmp, "absent.txt") });
+    const r = run([f, "--require-patterns"], { CONFIDENTIALITY_DENYLIST_FILE: join(tmp, "absent.txt") });
     expect(r.exitCode).toBe(2);
   });
 

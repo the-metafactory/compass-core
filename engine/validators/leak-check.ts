@@ -8,7 +8,7 @@
  *
  *   <path...>            Files or directories to scan (directories are walked recursively).
  *   --staged             Scan the *staged blobs* of the current git repo instead of paths.
- *   --patterns <file>    Operator pattern file. Overrides CONFIDENTIALITY_DENYLIST.
+ *   --patterns <file>    Operator pattern file. Overrides CONFIDENTIALITY_DENYLIST_FILE.
  *   --require-patterns   Treat a missing/unreadable pattern file as an error instead of a warning.
  *
  * Pattern file format: one regular expression per line; `#` comments and blank
@@ -18,8 +18,26 @@
  * Two tiers of rules:
  *   1. Built-ins — generic credential shapes that are wrong in any repo (see RULES).
  *   2. Operator patterns — loaded from the file named by `--patterns` or the
- *      `CONFIDENTIALITY_DENYLIST` env var. This is the public-hook/private-patterns
+ *      `CONFIDENTIALITY_DENYLIST_FILE` env var. This is the public-hook/private-patterns
  *      split: the guard is shared, the sensitive strings never are.
+ *
+ * WHY THE ENV VAR ENDS IN _FILE (it was renamed, deliberately):
+ * it used to be `CONFIDENTIALITY_DENYLIST`, the same name
+ * sops/confidentiality-gate.md (§0, §2) gives an org CI secret carrying the
+ * HASHED denylist payload consumed by a gate engine with a separate pepper
+ * secret. This repo implements only the SOP's PLAINTEXT "local gate" tier, so
+ * the value here is a FILE PATH, not a payload. Sharing one name across two
+ * contracts was not a naming wart but a fail-open: a SOP-shaped hashed payload
+ * fed to the old name produced "pattern file not found", a warning, and exit 0
+ * — green on precisely the terms the operator meant to guard. The SOP keeps
+ * `CONFIDENTIALITY_DENYLIST` for its payload; this scanner reads
+ * `CONFIDENTIALITY_DENYLIST_FILE`, and the suffix states what the value is.
+ *
+ * Residual, and NOT fixed by the rename: a *readable* file whose contents are
+ * hashes still loads happily — every line is a valid regex that matches
+ * nothing. `--require-patterns` catches an absent or unreadable file, not a
+ * well-formed file of the wrong kind. Verifying payload shape is a job for the
+ * hashed tier this repo does not implement.
  *
  * NEVER-ECHO RULE (sops/confidentiality-gate.md §0): this scanner reports
  * `file:line: rule-name` and nothing else. It never prints the matched text, the
@@ -172,7 +190,7 @@ if (!values.staged && positionals.length === 0) {
 // Operator patterns
 // ---------------------------------------------------------------------------
 
-const envPatterns = (process.env.CONFIDENTIALITY_DENYLIST ?? "").trim();
+const envPatterns = (process.env.CONFIDENTIALITY_DENYLIST_FILE ?? "").trim();
 const patternsPath = values.patterns ?? (envPatterns.length > 0 ? envPatterns : undefined);
 
 const operatorRules: Rule[] = [];
@@ -204,12 +222,12 @@ if (patternsPath && existsSync(patternsPath) && statSync(patternsPath).isFile())
   console.error(message);
 } else if (values["require-patterns"]) {
   console.error(
-    "leak-check: --require-patterns is set but no pattern file was given (--patterns or CONFIDENTIALITY_DENYLIST).",
+    "leak-check: --require-patterns is set but no pattern file was given (--patterns or CONFIDENTIALITY_DENYLIST_FILE).",
   );
   process.exit(EXIT_USAGE);
 } else {
   console.error(
-    "leak-check: CONFIDENTIALITY_DENYLIST is unset and no --patterns given — built-in rules only.",
+    "leak-check: CONFIDENTIALITY_DENYLIST_FILE is unset and no --patterns given — built-in rules only.",
   );
 }
 

@@ -6,7 +6,7 @@
 #
 # This hook is PUBLIC. The patterns it enforces do not have to be:
 #
-#     export CONFIDENTIALITY_DENYLIST="$HOME/.config/compass/denylist.txt"
+#     export CONFIDENTIALITY_DENYLIST_FILE="$HOME/.config/compass/denylist.txt"
 #
 # points the scanner at an operator-owned pattern file that lives OUTSIDE the
 # repo — one regex per line, `#` comments ignored. The guard is shared through
@@ -17,20 +17,26 @@
 # (sops/confidentiality-gate.md §0, the never-quote rule). Open the locations it
 # names; do not paste what you find into a commit message, a PR, or a chat.
 #
-# THE NAME IS SHARED WITH THE SOP, THE CONTRACT IS NOT
-# -----------------------------------------------------
-# sops/confidentiality-gate.md (§0, §2) uses CONFIDENTIALITY_DENYLIST for an org
-# CI secret carrying the HASHED denylist payload, read by a gate engine that also
-# holds a separate pepper secret. This repo ships none of that. leak-check
-# implements only the SOP's PLAINTEXT "local gate" capability, so here the same
-# variable names a FILE PATH containing plaintext regexes — one per line.
+# WHY THIS VARIABLE ENDS IN _FILE
+# --------------------------------
+# It used to be called CONFIDENTIALITY_DENYLIST — the same name
+# sops/confidentiality-gate.md (§0, §2) gives an org CI secret carrying the
+# HASHED denylist payload, read by a gate engine that also holds a separate
+# pepper secret. This repo ships none of that machinery. leak-check implements
+# only the SOP's PLAINTEXT "local gate" capability: it wants a FILE PATH to a
+# file of plaintext regexes, one per line.
 #
-# Point it at a SOP-shaped hashed payload and you get "pattern file not found",
-# a warning, and exit 0: a silent fail-open on exactly the terms you meant to
-# guard. Pass --require-patterns to turn that into a hard error. A rename to
-# CONFIDENTIALITY_DENYLIST_FILE is planned to end the collision; until then the
-# two contracts share a name and differ in meaning, and this comment is the only
-# place that says so out loud.
+# Two different contracts under one name is not a documentation problem, it is a
+# fail-open. Point the old shared name at a SOP-shaped hashed payload and the
+# scanner said "pattern file not found", warned, and exited 0 — green on exactly
+# the terms you meant to guard. The rename has now HAPPENED: the SOP keeps
+# CONFIDENTIALITY_DENYLIST for its hashed payload, and the path this scanner
+# reads is CONFIDENTIALITY_DENYLIST_FILE. A name that lies is worse than a long
+# name, and the _FILE suffix says what the value is.
+#
+# --require-patterns still turns a missing or unreadable pattern file into a hard
+# error. Local hook use deliberately stays warn-and-continue (see FAIL-OPEN
+# below); CI defaults to --require-patterns instead.
 #
 # FAIL-OPEN, DELIBERATELY
 # -----------------------
@@ -65,7 +71,7 @@ if [ ! -f "$scanner" ]; then
   exit 0
 fi
 
-# CONFIDENTIALITY_DENYLIST is read from the environment by the scanner itself.
+# CONFIDENTIALITY_DENYLIST_FILE is read from the environment by the scanner itself.
 if bun "$scanner" --staged; then
   status=0
 else

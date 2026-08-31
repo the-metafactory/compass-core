@@ -2,19 +2,33 @@
 /**
  * install.ts — install compass-core governance into a target repository.
  *
- *   bun engine/install.ts <target-dir> [--force] [--dry-run]
+ *   bun engine/install.ts <target-dir> [--with-ci] [--force] [--dry-run]
  *
- * Addresses the-metafactory/compass-core#17, acceptance criteria 1-4. Criterion
- * 5 (installable CI gates) is deliberately out of scope for this cut.
+ * Addresses the-metafactory/compass-core#17, all five acceptance criteria.
  *
  * ## What it writes, and only where
  *
  *   <target>/sops/*.md   the shipped SOPs, rendered against the target's config
  *   <target>/CLAUDE.md   a marked block: critical rules + SOP activation table
  *
- * Nothing is written outside <target>. engine/, standards/, templates/ and the
- * governance skill are NOT copied in this cut — the SOPs plus the CLAUDE.md
- * block are what a governed repo needs at run time.
+ * With --with-ci, also:
+ *
+ *   <target>/.githooks/pre-commit                        the local leak gate
+ *   <target>/.github/workflows/compass-governance.yml    the PR gate, rendered
+ *
+ * Nothing is written outside <target>. engine/, standards/ and the governance
+ * skill are NOT copied — the CI workflow checks compass-core out for itself,
+ * pinned by SHA, so the governed repo never carries the engine.
+ *
+ * ## Why the CI gate is opt-in and the CLAUDE.md block is not flag-dependent
+ *
+ * --with-ci adds files; it does NOT change a single byte of the generated
+ * CLAUDE.md block. Block content is a pure function of the config, so two
+ * targets with the same config get the same block whether or not either asked
+ * for CI. Folding "arm your hook" into the block would make its content depend
+ * on a command-line flag, and a re-install without the flag would then silently
+ * rewrite it. The arming instruction is printed to stdout instead, and repeated
+ * in the hook and workflow headers where someone reading them will find it.
  *
  * ## Why render at install time
  *
@@ -66,13 +80,45 @@
  * and assumes no runtime, no bun, no toolchain.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { loadConfigFrom, type CompassConfig } from "./lib/config.ts";
 import { buildClaudeBlock, mergeClaudeMd, renderText } from "./lib/render.ts";
 
 const PACKAGE_ROOT = resolve(import.meta.dir, "..");
 const SOURCE_SOPS = join(PACKAGE_ROOT, "sops");
+const SOURCE_HOOK = join(PACKAGE_ROOT, ".githooks", "pre-commit");
+const SOURCE_WORKFLOW = join(PACKAGE_ROOT, "templates", "workflows", "compass-governance.yml");
+
+/**
+ * The compass-core commit the generated CI workflow pins its engine checkout to.
+ *
+ * Baked in rather than read from the local checkout's HEAD, on purpose. Resolving
+ * `git rev-parse HEAD` at install time would pin whatever branch the operator
+ * happened to run from — including an unmerged feature branch, or a dirty tree —
+ * and would make the rendered workflow differ between machines installing "the
+ * same" compass-core. A gate consumers copy should point at a reviewed commit on
+ * main, and it should be the same commit for everyone who installs this build.
+ *
+ * Bumping it is a deliberate edit here, and re-running the installer re-renders
+ * the pin into the target. Consumers may equally bump the SHA in their own
+ * workflow file and read what changed, which is the upgrade path the workflow
+ * header describes.
+ */
+const ENGINE_REF = "1214e7dde76b937d31261c329fe5089fd03aee91";
+
+/** Substituted into the workflow template at install time. */
+const TEMPLATE_VALUES: Record<string, string> = {
+  compass_core_ref: ENGINE_REF,
+};
 
 const EXIT = {
   USAGE: 2,
@@ -84,10 +130,12 @@ const EXIT = {
   MARKERS_MALFORMED: 8,
 } as const;
 
-const USAGE = `usage: bun engine/install.ts <target-dir> [--force] [--dry-run]
+const USAGE = `usage: bun engine/install.ts <target-dir> [--with-ci] [--force] [--dry-run]
 
   <target-dir>  the repository to install governance into. Must exist and
                 contain a compass.config.yaml.
+  --with-ci     also install the pre-commit leak hook and the PR governance
+                workflow. Does not change the CLAUDE.md block.
   --force       overwrite existing files that differ from the rendered output.
   --dry-run     report what would be written; touch nothing.`;
 
@@ -101,16 +149,19 @@ interface Args {
   targetDir: string;
   force: boolean;
   dryRun: boolean;
+  withCi: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
   let targetDir: string | undefined;
   let force = false;
   let dryRun = false;
+  let withCi = false;
 
   for (const arg of argv) {
     if (arg === "--force") force = true;
     else if (arg === "--dry-run") dryRun = true;
+    else if (arg === "--with-ci") withCi = true;
     else if (arg === "--help" || arg === "-h") {
       console.log(USAGE);
       process.exit(0);
@@ -123,7 +174,7 @@ function parseArgs(argv: string[]): Args {
   if (targetDir === undefined) {
     fail("USAGE", `no target directory given.\n\n${USAGE}`);
   }
-  return { targetDir, force, dryRun };
+  return { targetDir, force, dryRun, withCi };
 }
 
 /** Load the TARGET's config. Never the ambient one — see loadConfigFrom. */
@@ -149,10 +200,25 @@ interface Rendered {
   /** Path relative to the target root. */
   rel: string;
   contents: string;
+  /** POSIX mode. Set for the hook, which is inert unless executable. */
+  mode?: number;
+}
+
+/**
+ * Substitute `{{template:...}}` values. Deliberately separate from renderText:
+ * that function owns the `{{config:...}}` namespace and leaves every other
+ * namespace alone (it is tested for exactly that), and the CI pin is an
+ * install-time fact rather than a config value.
+ */
+function renderTemplateValues(text: string): string {
+  return text.replace(/\{\{template:([a-z_]+)\}\}/g, (whole, key: string) => {
+    const value = TEMPLATE_VALUES[key];
+    return value === undefined ? whole : value;
+  });
 }
 
 function main(): void {
-  const { targetDir: rawTarget, force, dryRun } = parseArgs(process.argv.slice(2));
+  const { targetDir: rawTarget, force, dryRun, withCi } = parseArgs(process.argv.slice(2));
   const targetDir = resolve(rawTarget);
 
   if (!existsSync(targetDir) || !statSync(targetDir).isDirectory()) {
@@ -187,6 +253,33 @@ function main(): void {
     rendered.push({ rel: join("sops", file), contents: result.text });
   }
 
+  if (withCi) {
+    // The hook is plain shell with no placeholders — copied verbatim, but its
+    // executable bit is load-carrying: git ignores a non-executable hook, which
+    // would install a security gate that silently never runs.
+    rendered.push({
+      rel: join(".githooks", "pre-commit"),
+      contents: readFileSync(SOURCE_HOOK, "utf8"),
+      mode: 0o755,
+    });
+
+    // The workflow carries the compass-core pin, and is run through the config
+    // renderer too so a future {{config:...}} in it resolves like anything else.
+    const workflowSource = readFileSync(SOURCE_WORKFLOW, "utf8");
+    const workflowResult = renderText(workflowSource, config);
+    for (const key of workflowResult.unresolved) {
+      const files = unresolved.get(key) ?? [];
+      files.push("templates/workflows/compass-governance.yml");
+      unresolved.set(key, files);
+    }
+    for (const key of workflowResult.defaulted) defaulted.add(key);
+    for (const key of workflowResult.dropped) dropped.add(key);
+    rendered.push({
+      rel: join(".github", "workflows", "compass-governance.yml"),
+      contents: renderTemplateValues(workflowResult.text),
+    });
+  }
+
   if (unresolved.size > 0) {
     const lines = [...unresolved.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -215,7 +308,13 @@ function main(): void {
       continue;
     }
     const existing = readFileSync(path, "utf8");
-    if (existing === item.contents) unchanged.push(item.rel);
+    // Identical bytes are a no-op — unless the mode is wrong. An existing hook
+    // with the right content and no execute bit is a gate that never fires, so
+    // treat that as work to do rather than "already current".
+    const modeOk =
+      item.mode === undefined || (statSync(path).mode & 0o777) === item.mode;
+    if (existing === item.contents && modeOk) unchanged.push(item.rel);
+    else if (existing === item.contents) toWrite.push(item);
     else if (force) toWrite.push(item);
     else refused.push(item.rel);
   }
@@ -241,6 +340,7 @@ function main(): void {
       const path = join(targetDir, item.rel);
       mkdirSync(join(path, ".."), { recursive: true });
       writeFileSync(path, item.contents);
+      if (item.mode !== undefined) chmodSync(path, item.mode);
     }
     if (claudeChanged) writeFileSync(claudePath, mergedClaude);
   }
@@ -278,6 +378,20 @@ function main(): void {
   }
   if (dropped.size > 0) {
     console.log(`  optional keys unset (prose closed over them): ${[...dropped].sort().join(", ")}`);
+  }
+
+  if (withCi) {
+    console.log(`  CI gate: pinned to compass-core ${ENGINE_REF.slice(0, 12)}`);
+    console.log("");
+    console.log("  The pre-commit hook is inert until this clone opts in. Once per clone:");
+    console.log("");
+    console.log("      git config core.hooksPath .githooks");
+    console.log("");
+    console.log("  Optionally point it at an operator pattern file (plaintext regexes,");
+    console.log("  one per line, kept OUTSIDE the repo):");
+    console.log("");
+    console.log('      export CONFIDENTIALITY_DENYLIST_FILE="$HOME/.config/compass/denylist.txt"');
+    console.log("");
   }
 
   if (refused.length > 0) {
