@@ -355,9 +355,15 @@ function value(config: CompassConfig, key: string): string | null {
 }
 
 /**
- * Build the marked CLAUDE.md block: the SOP activation table plus the
- * repo-specific values, both fully rendered. Deterministic for fixed inputs —
- * no timestamps, no version stamp, nothing that would break idempotency.
+ * Build the marked CLAUDE.md block: the critical rules, the SOP activation
+ * table, and the repo-specific values, all fully rendered. The rules are the
+ * four generic ones from templates/CLAUDE.md.template — universal engineering
+ * discipline, nothing org-flavoured — and they are here so an installed repo
+ * satisfies compass-core's own claude-md-check out of the box rather than the
+ * installer and the validator disagreeing about what "governed" means.
+ *
+ * Deterministic for fixed inputs — no timestamps, no version stamp, nothing
+ * that would break idempotency.
  */
 export function buildClaudeBlock(config: CompassConfig, sopFiles: string[]): string {
   const present = new Set(sopFiles);
@@ -390,6 +396,15 @@ export function buildClaudeBlock(config: CompassConfig, sopFiles: string[]): str
     "<!-- Managed by compass-core. Everything between these markers is regenerated",
     "     by `bun engine/install.ts <dir>`; bytes outside them are never touched.",
     "     To change what appears here, edit compass.config.yaml and re-run install. -->",
+    "",
+    "## Critical Rules",
+    "",
+    "- NEVER describe code you haven't read. Use Read/Glob/Grep to verify before making claims.",
+    "- NEVER fabricate file names, class names, or architecture. If unsure, read the source.",
+    "- Fix ALL errors found during type checks, tests, or linting — even pre-existing ones, and",
+    "  even ones another developer introduced. Never dismiss an error as \"not from our changes\".",
+    "- Before fixing a bug or building a feature, ALWAYS check open PRs (`gh pr list`) and issues",
+    "  (`gh issue list`) first. Someone may already be on it, or a PR may already fix it.",
     "",
     "## Standard Operating Procedures",
     "",

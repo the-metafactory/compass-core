@@ -74,6 +74,12 @@ labels:
 channels:
   team: "#eng-internal"
   public: "#community"
+validators:
+  claude_md:
+    enabled: true
+    required_sections:
+      - Critical Rules
+      - Standard Operating Procedures
 versioning:
   manifest: arc-manifest.yaml
   release_title_format: "{repo} v{version}"
@@ -206,19 +212,43 @@ describe("install.ts — fresh install", () => {
     }
   });
 
-  test("the block supplies the Standard Operating Procedures section, not Critical Rules", () => {
+  test("the block supplies both required sections, rules before the SOP table", () => {
     const dir = target();
     run([dir]);
     const claude = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+    expect(claude).toContain("## Critical Rules");
     expect(claude).toContain("## Standard Operating Procedures");
-    // Deliberate scope line for this cut (compass-core#17 criteria 1-4): the
-    // installed block is the SOP activation table only. It does NOT supply
-    // "## Critical Rules", which templates/CLAUDE.md.template does and which
-    // the default validators.claude_md.required_sections asks for — so a repo
-    // installed with the example config does not yet satisfy claude-md-check
-    // on its own. Pinned here so the gap is visible rather than a surprise;
-    // widening the block is a governance-content decision, not a code fix.
-    expect(claude).not.toContain("## Critical Rules");
+    // Order matters: the rules govern how the SOPs below are followed.
+    expect(claude.indexOf("## Critical Rules")).toBeLessThan(
+      claude.indexOf("## Standard Operating Procedures"),
+    );
+  });
+
+  test("ships the four generic rules from the CLAUDE.md template", () => {
+    const dir = target();
+    run([dir]);
+    const claude = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+    expect(claude).toContain("NEVER describe code you haven't read");
+    expect(claude).toContain("NEVER fabricate file names");
+    expect(claude).toContain("Fix ALL errors");
+    expect(claude).toContain("gh pr list");
+  });
+
+  test("an installed CLAUDE.md passes compass-core's own claude-md-check", () => {
+    const dir = target();
+    expect(run([dir]).exitCode).toBe(0);
+
+    // The real validator, as a subprocess, against the real installed file.
+    // The installer and the validator must agree on what "governed" looks
+    // like; if they drift, this fails.
+    const validator = join(REPO, "engine", "validators", "claude-md-check.ts");
+    const proc = Bun.spawnSync(["bun", validator, join(dir, "CLAUDE.md")], {
+      env: { ...process.env, COMPASS_CONFIG: "" },
+      cwd: dir,
+    });
+    const stderr = new TextDecoder().decode(proc.stderr);
+    expect(stderr).toBe("");
+    expect(proc.exitCode).toBe(0);
   });
 
   test("creates a CLAUDE.md containing only the block when none exists", () => {

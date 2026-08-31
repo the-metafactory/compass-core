@@ -10,7 +10,7 @@
  * ## What it writes, and only where
  *
  *   <target>/sops/*.md   the shipped SOPs, rendered against the target's config
- *   <target>/CLAUDE.md   a marked block carrying the SOP activation table
+ *   <target>/CLAUDE.md   a marked block: critical rules + SOP activation table
  *
  * Nothing is written outside <target>. engine/, standards/, templates/ and the
  * governance skill are NOT copied in this cut — the SOPs plus the CLAUDE.md

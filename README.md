@@ -36,12 +36,16 @@ That writes two things, and nothing outside the target:
 | Path | What |
 |------|------|
 | `<target>/sops/*.md` | the SOPs, **rendered** — real branch pattern, real manifest, real channel |
-| `<target>/CLAUDE.md` | a `<!-- compass-core:begin -->…<!-- compass-core:end -->` block holding the SOP activation table |
+| `<target>/CLAUDE.md` | a `<!-- compass-core:begin -->…<!-- compass-core:end -->` block: critical rules, then the SOP activation table, then your repo-specific values |
 
 The rendering is the point. An installed SOP names your actual values, so no
 generated file tells the model to go and read `compass.config.yaml` at run time
 ([#17](https://github.com/the-metafactory/compass-core/issues/17)). The output
 is plain markdown: the target repo needs no bun, no runtime, no toolchain.
+
+The block also carries the four generic critical rules, so an installed repo
+passes compass-core's own `claude-md-check` out of the box — the installer and
+the validator agree on what "governed" looks like.
 
 **Flags:** `--force` overwrites existing files that differ; `--dry-run` reports
 what would be written and touches nothing.
@@ -151,8 +155,8 @@ bun install
 bun test
 ```
 
-76 tests covering the config loader (19), the claude-md validator CLI (6), the
-install-time renderer (29), and the installer CLI (22).
+78 tests covering the config loader (19), the claude-md validator CLI (6), the
+install-time renderer (29), and the installer CLI (24).
 
 ## Versioning
 
