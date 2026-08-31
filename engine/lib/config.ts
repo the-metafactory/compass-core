@@ -140,13 +140,14 @@ export function findConfigPath(opts: LoadConfigOptions = {}): string | null {
 }
 
 /**
- * Load compass.config.yaml. Returns null if no config file is found.
- * Throws if the file exists but cannot be parsed or fails schema validation.
+ * Load and validate the config at exactly `path` — no discovery, no env-var
+ * override, no cwd fallback. Used by consumers that already know which config
+ * they mean and must not be redirected to another one (e.g., the installer,
+ * which reads the *target* repo's config and nothing else).
+ *
+ * Throws if the file cannot be parsed or fails schema validation.
  */
-export function loadConfig(opts: LoadConfigOptions = {}): CompassConfig | null {
-  const path = findConfigPath(opts);
-  if (!path) return null;
-
+export function loadConfigFrom(path: string): CompassConfig {
   const text = readFileSync(path, "utf8");
   const parsed = parseYaml(text) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -164,4 +165,15 @@ export function loadConfig(opts: LoadConfigOptions = {}): CompassConfig | null {
   }
 
   return result.data;
+}
+
+/**
+ * Load compass.config.yaml, discovering it via `findConfigPath`. Returns null
+ * if no config file is found. Throws if the file exists but cannot be parsed
+ * or fails schema validation.
+ */
+export function loadConfig(opts: LoadConfigOptions = {}): CompassConfig | null {
+  const path = findConfigPath(opts);
+  if (!path) return null;
+  return loadConfigFrom(path);
 }
