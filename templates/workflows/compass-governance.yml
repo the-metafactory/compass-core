@@ -6,11 +6,29 @@
 # It assumes the governance engine is installed at the repo root, so that
 # engine/validators/*.ts resolve. If it lives elsewhere, adjust the paths below.
 #
-# Optional: set a repository or organisation secret named CONFIDENTIALITY_DENYLIST
-# holding the operator pattern file's contents (one regex per line). Without it,
-# leak-check runs its built-in rules only. Secrets are not exposed to fork PRs,
-# so a fork run is always built-ins-only — see sops/confidentiality-gate.md §5 for
-# the local-gate step a maintainer owes a fork PR before merging.
+# CONFIDENTIALITY_DENYLIST — READ THIS BEFORE WIRING THE SECRET
+# -------------------------------------------------------------
+# The name is shared with sops/confidentiality-gate.md, the contract is not.
+# The SOP (§0, §2) describes an org secret carrying the HASHED denylist payload,
+# consumed by a gate engine that also reads a separate pepper secret. This
+# repo's leak-check implements only the SOP's PLAINTEXT "local gate" capability:
+# it wants a file of plaintext regexes, one per line. So the variable means a
+# file PATH locally, and this workflow materialises the secret's plaintext
+# CONTENTS into a temp file before pointing the variable at it. There is no
+# hashing, no pepper, and no hashed tier anywhere in this repo.
+#
+# The practical trap: feeding a SOP-shaped hashed payload straight to this
+# scanner produces a "pattern file not found" warning and exit 0 — a silent
+# fail-open on the very class the SOP cares most about. Add --require-patterns
+# to the scanner invocation if this job must refuse to run degraded. A rename to
+# CONFIDENTIALITY_DENYLIST_FILE is planned to end the collision.
+#
+# Secrets are not exposed to fork PRs, so a fork run is always built-ins-only —
+# see sops/confidentiality-gate.md §5 for the local-gate step a maintainer owes
+# a fork PR before merging.
+#
+# Actions are pinned by commit SHA, not tag. A tag is mutable; a security gate
+# that a consumer copies should not be re-pointable by whoever can move it.
 
 name: compass governance
 
@@ -25,12 +43,12 @@ jobs:
   governance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Full history: the leak-check step diffs against the PR base.
+          # Full history: the leak-check step needs the merge-base of the PR.
           fetch-depth: 0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -58,11 +76,39 @@ jobs:
             echo "::notice::CONFIDENTIALITY_DENYLIST is not available to this run — built-in rules only."
           fi
 
-          git diff --name-only --diff-filter=ACM "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          # Diff from the MERGE-BASE, not the base branch tip. The checkout is the
+          # merge commit, so its files include whatever main has merged in; a
+          # two-dot diff against the base tip lists files only main touched and
+          # fails the PR on somebody else's leak.
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
 
-          if [ ! -s "$RUNNER_TEMP/changed.txt" ]; then
-            echo "No added or modified files in this PR — nothing to scan."
+          # --no-renames + R in the filter, deliberately, and both are load-
+          # carrying: without them a rename-plus-edit is reported as a single R
+          # entry, ACM drops it, and the renamed file — secret and all — is never
+          # scanned. Verified: git mv + append a credential produces an EMPTY
+          # ACM listing.
+          git diff --no-renames --name-only --diff-filter=ACMR -z \
+            "$MERGE_BASE" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+
+          # The list names paths as the PR HEAD has them, but the checkout on disk
+          # is the MERGE commit. A file the PR added and the base branch then
+          # deleted is listed and absent — and absent from the merged result too,
+          # so there is nothing to scan and nothing at risk. Drop those, loudly:
+          # leak-check treats a missing path as a usage error, on purpose.
+          : > "$RUNNER_TEMP/scan.txt"
+          while IFS= read -r -d '' f; do
+            if [ -f "$f" ]; then
+              printf '%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
+            else
+              echo "::notice::$f is in the PR diff but not in the merged tree — not scanned."
+            fi
+          done < "$RUNNER_TEMP/changed.txt"
+
+          if [ ! -s "$RUNNER_TEMP/scan.txt" ]; then
+            echo "No added, modified, or renamed files to scan in this PR."
             exit 0
           fi
 
-          xargs -a "$RUNNER_TEMP/changed.txt" -d '\n' bun engine/validators/leak-check.ts
+          # NUL-separated throughout: filenames with spaces or newlines survive
+          # intact, and xargs -0 is portable in a way that GNU's -a/-d are not.
+          xargs -0 bun engine/validators/leak-check.ts < "$RUNNER_TEMP/scan.txt"

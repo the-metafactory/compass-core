@@ -28,6 +28,14 @@
  * only. Do not add a "context" or "--verbose" mode that breaks this; the tool's
  * output goes into CI logs, PR comments, and hook output that anyone can read.
  *
+ * WHAT THE WALK DOES NOT LOOK AT, and why it says so out loud:
+ * a symlink met while walking a directory is NOT followed — a symlinked cycle
+ * would hang the walk and a symlinked tree would report the same finding under
+ * two paths. The count is printed in the summary, because an uncounted skip is
+ * a hiding place. A symlink named directly on the command line IS followed and
+ * scanned; only the recursive walk declines. Same for binary files (NUL in the
+ * first 8 KB) and files over the size cap: skipped, counted, never silent.
+ *
  * Exit codes: 0 = clean, 1 = findings, 2 = usage/configuration error.
  */
 
@@ -127,6 +135,9 @@ interface Finding {
  */
 let skipped = 0;
 
+/** Symlinks declined by the recursive walk (loop safety — see the header). */
+let skippedSymlinks = 0;
+
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
@@ -224,7 +235,10 @@ function collectFiles(path: string, out: string[]): void {
   if (st.isDirectory()) {
     for (const entry of readdirSync(path, { withFileTypes: true })) {
       if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
-      if (entry.isSymbolicLink()) continue;
+      if (entry.isSymbolicLink()) {
+        skippedSymlinks++;
+        continue;
+      }
       collectFiles(join(path, entry.name), out);
     }
     return;
@@ -340,7 +354,10 @@ for (const target of targets) {
 // ---------------------------------------------------------------------------
 
 const ruleSummary = `${RULES.length} built-in rule(s) + ${operatorRules.length} operator pattern(s)`;
-const skipNote = skipped > 0 ? `, ${skipped} binary/oversize file(s) NOT scanned` : "";
+const skipParts: string[] = [];
+if (skipped > 0) skipParts.push(`${skipped} binary/oversize file(s) NOT scanned`);
+if (skippedSymlinks > 0) skipParts.push(`${skippedSymlinks} symlink(s) NOT followed`);
+const skipNote = skipParts.length > 0 ? `, ${skipParts.join(", ")}` : "";
 
 if (findings.length === 0) {
   console.log(`leak-check: clean — ${targets.length} file(s) scanned${skipNote}, ${ruleSummary} active.`);

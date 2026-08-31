@@ -17,6 +17,21 @@
 # (sops/confidentiality-gate.md §0, the never-quote rule). Open the locations it
 # names; do not paste what you find into a commit message, a PR, or a chat.
 #
+# THE NAME IS SHARED WITH THE SOP, THE CONTRACT IS NOT
+# -----------------------------------------------------
+# sops/confidentiality-gate.md (§0, §2) uses CONFIDENTIALITY_DENYLIST for an org
+# CI secret carrying the HASHED denylist payload, read by a gate engine that also
+# holds a separate pepper secret. This repo ships none of that. leak-check
+# implements only the SOP's PLAINTEXT "local gate" capability, so here the same
+# variable names a FILE PATH containing plaintext regexes — one per line.
+#
+# Point it at a SOP-shaped hashed payload and you get "pattern file not found",
+# a warning, and exit 0: a silent fail-open on exactly the terms you meant to
+# guard. Pass --require-patterns to turn that into a hard error. A rename to
+# CONFIDENTIALITY_DENYLIST_FILE is planned to end the collision; until then the
+# two contracts share a name and differ in meaning, and this comment is the only
+# place that says so out loud.
+#
 # FAIL-OPEN, DELIBERATELY
 # -----------------------
 # Missing tooling (no bun, no scanner) prints how to fix it and exits 0 — the

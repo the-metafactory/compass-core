@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -165,6 +165,32 @@ describe("leak-check.ts — built-in rules", () => {
     expect(r.exitCode).toBe(0);
     // A silent skip is a hiding place — the count has to be visible.
     expect(r.stdout).toContain("1 binary/oversize file(s) NOT scanned");
+  });
+
+  test("does not follow symlinks met while walking, and counts them", () => {
+    // Target lives OUTSIDE the walked tree, so anything reported can only have
+    // come from following the link.
+    const outside = join(tmp, "outside.txt");
+    writeFileSync(outside, `${FAKE.awsKeyId}\n`);
+    const walked = join(tmp, "walked");
+    mkdirSync(walked, { recursive: true });
+    writeFileSync(join(walked, "real.txt"), "nothing here\n");
+    symlinkSync(outside, join(walked, "link.txt"));
+
+    const r = run([walked]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("1 symlink(s) NOT followed");
+  });
+
+  test("a symlink named directly on the command line IS scanned", () => {
+    const outside = join(tmp, "outside.txt");
+    writeFileSync(outside, `${FAKE.awsKeyId}\n`);
+    const link = join(tmp, "direct-link.txt");
+    symlinkSync(outside, link);
+
+    const r = run([link]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("aws-access-key-id");
   });
 
   test("a placeholder-ish prefix does not swallow a real credential", () => {
