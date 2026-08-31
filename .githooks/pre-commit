@@ -38,6 +38,27 @@
 # error. Local hook use deliberately stays warn-and-continue (see FAIL-OPEN
 # below); CI defaults to --require-patterns instead.
 #
+# WHERE THE SCANNER COMES FROM
+# -----------------------------
+# Two resolutions, tried in order:
+#
+#   1. $repo_root/.githooks/leak-check.ts — an INSTALLED target. The compass-core
+#      installer's --with-ci arm copies the scanner in beside this hook, so the
+#      gate travels as one self-contained pair.
+#   2. $repo_root/engine/validators/leak-check.ts — compass-core itself, and any
+#      repo that vendors the engine wholesale.
+#
+# Copying is safe because leak-check.ts imports node builtins only (node:util,
+# node:fs, node:path): no package, no relative import, no dependency on the tree
+# it was copied out of. It runs anywhere bun does.
+#
+# This hook once shipped WITHOUT arm 1, while the installer copied the hook and
+# the workflow but never engine/. Every installed target therefore resolved a
+# path that does not exist there, took the "scanner not found" arm below, and
+# exited 0 on every commit — a gate that looked armed and had never scanned a
+# byte. Arm 1 is what makes that arm unreachable in a --with-ci install, and a
+# test asserts exactly that (engine/__tests__/install.test.ts).
+#
 # FAIL-OPEN, DELIBERATELY
 # -----------------------
 # Missing tooling (no bun, no scanner) prints how to fix it and exits 0 — the
@@ -47,6 +68,9 @@
 # once the scanner runs, its exit code is this hook's exit code, and no
 # `--no-verify` habit is condoned by that. The authoritative gate is CI, which
 # controls its own runtime and does not degrade.
+#
+# Note what fail-open must never become: the arm everybody always takes. It is a
+# concession to the operator whose bun is missing, not the resting state.
 
 # Note: no `set -e` — this hook inspects the scanner's exit code deliberately.
 set -u
@@ -56,7 +80,15 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
   exit 0
 }
 
-scanner="$repo_root/engine/validators/leak-check.ts"
+# Installed copy first, engine checkout second. See WHERE THE SCANNER COMES FROM.
+scanner_installed="$repo_root/.githooks/leak-check.ts"
+scanner_engine="$repo_root/engine/validators/leak-check.ts"
+
+if [ -f "$scanner_installed" ]; then
+  scanner="$scanner_installed"
+else
+  scanner="$scanner_engine"
+fi
 
 if ! command -v bun >/dev/null 2>&1; then
   echo "pre-commit: bun not found — leak-check SKIPPED, commit allowed." >&2
@@ -66,8 +98,13 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 
 if [ ! -f "$scanner" ]; then
-  echo "pre-commit: $scanner not found — leak-check SKIPPED, commit allowed." >&2
-  echo "            Install the governance engine into this repo to re-arm the hook." >&2
+  echo "pre-commit: no leak-check scanner found — leak-check SKIPPED, commit allowed." >&2
+  echo "            Looked for, in order:" >&2
+  echo "              $scanner_installed" >&2
+  echo "              $scanner_engine" >&2
+  echo "            A compass-core install with --with-ci writes the first of those" >&2
+  echo "            alongside this hook. Re-run the installer to re-arm the gate:" >&2
+  echo "              bun <compass-core>/engine/install.ts $repo_root --with-ci" >&2
   exit 0
 fi
 

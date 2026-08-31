@@ -1,43 +1,118 @@
+# arc-manifest.yaml — how arc sees compass-core.
+#
+# WHAT ARC DOES WITH THIS PACKAGE, EXACTLY
+# ----------------------------------------
+# It fetches it. That is the whole contract.
+#
+#     arc install @the-metafactory/compass-core   # puts the package in the store
+#     bun <store-path>/engine/install.ts <your-repo> [--with-ci]
+#
+# The second line is the blessed — and only — project-install path. engine/
+# install.ts renders the SOPs against YOUR repo's compass.config.yaml, merges a
+# marked block into your CLAUDE.md leaving every byte outside the markers alone,
+# refuses to overwrite anything that differs, and exits nonzero telling you what
+# it refused. Nothing in THIS file installs a project.
+#
+# It used to claim otherwise, and the claims were not merely decorative:
+#
+#   * `provides.templates` was live. arc renders templates into the consumer's
+#     CWD for type `rules` and type `governance` (arc: src/lib/artifact-
+#     installer.ts:521), and `generateRules` writes with a bare `Bun.write` —
+#     no existence check, no prompt, no backup (arc: src/lib/rules.ts:119).
+#     So `arc install` in a repo that already had a CLAUDE.md OVERWROTE it.
+#     Worse, it overwrote it with garbage: arc substitutes flat single-brace
+#     `{KEY}` from a config file in the consumer repo (src/lib/rules.ts:122),
+#     and this repo's templates are written in `{{config:...}}` /
+#     `{{template:...}}`, which that renderer does not recognise and leaves
+#     verbatim. The templates are therefore NOT declared here any more.
+#     templates/ still ships them — engine/install.ts and the new-repo workflow
+#     use them through their own renderer, which does speak that grammar.
+#
+#   * `provides.skill` and `provides.agent` were inert. arc symlinks into
+#     ~/.claude off the package's `type:`, not off `provides` (arc: src/lib/
+#     artifact-installer.ts:173-333), and `type: governance` links neither a
+#     skill nor an agent. `provides.agent` is not a key arc has at all, and
+#     `provides.skill` is typed `{ trigger }[]`, read only by `arc info`'s
+#     printer — never by the linker. Both are gone rather than reshaped: a
+#     declaration whose only effect is to make a reader believe an install
+#     happened is worse than silence. claude/skills/governance and
+#     claude/agents/governance.md are still in the tree, and reach ~/.claude by
+#     being installed there deliberately, not as a side effect of arc install.
+#
+#   * `provides.validators`, `provides.ci` and `requires.config` were not arc
+#     keys in any version. arc validates nothing under `provides` and ignores
+#     unknown top-level keys silently (there is no `additionalProperties:false`
+#     anywhere in it), so they read as contract and behaved as comments. The
+#     facts they carried are true and now live where they are enforced: the
+#     validators in package.json scripts, the config requirement in engine/
+#     install.ts, which exits 4 (CONFIG_NOT_FOUND) without one.
+#
+# Verify this file with `arc validate .` — arc's strict validator, which is
+# stricter than the loader `arc install` uses.
+
+schema: arc/v1
 name: "@the-metafactory/compass-core"
+# KNOWN VIOLATION, deliberately not fixed here — the one thing `arc validate .`
+# still reports. arc/v1 wants `^[a-z0-9]+(-[a-z0-9]+)*$` plus a bare
+# `namespace:` — i.e. `name: compass-core`, `namespace: the-metafactory`.
+#
+# Not the reason to leave it: breaking `arc install @the-metafactory/compass-
+# core`. That input is parsed as a scoped ref straight to the git remote and
+# never consulted against this field (arc: src/commands/install.ts:1591), so the
+# handle would survive the rename.
+#
+# The actual reason: `name` is the package's INSTALLED identity — the store
+# directory, and the key `arc list`, `arc upgrade` and `arc remove` match an
+# existing install by. Changing it orphans every copy already on disk, and
+# package.json carries the scoped string too. That is a rename with a migration
+# attached, and it belongs to a release, not to a defect fix whose subject is
+# clobbering. Left loud, and left failing validation on purpose, rather than
+# changed quietly here.
 version: 0.4.3
 type: governance
-description: "Reusable governance engine for Claude Code projects — SOPs, validators, governance skill + subagent, CLAUDE.md template"
+tier: official
+description: >-
+  Reusable governance engine for Claude Code projects — SOPs, validators,
+  governance skill + subagent, CLAUDE.md template. arc install fetches the
+  package; install it into a repo with
+  `bun <store-path>/engine/install.ts <your-repo> [--with-ci]`.
 author:
   name: the-metafactory
   github: the-metafactory
 repository: the-metafactory/compass-core
 license: MIT
 
-provides:
-  skill:
-    - name: governance
-      path: claude/skills/governance
-      install: ~/.claude/skills/governance
-  agent:
-    - name: governance
-      path: claude/agents/governance.md
-      install: ~/.claude/agents/governance.md
-  templates:
-    - source: templates/CLAUDE.md.template
-      target: CLAUDE.md
-      config: compass.config.yaml
-    - source: templates/arc-manifest.template.yaml
-      target: arc-manifest.yaml
-      config: compass.config.yaml
-  validators:
-    - engine/validators/claude-md-check.ts
-    - engine/validators/label-check.ts
-  ci:
-    - engine/ci/run-all.ts
-
-requires:
-  config: compass.config.yaml
-
+# All four sub-blocks are declared, empties included: arc requires the block in
+# full so that risk is never silently defaulted to "low" (arc: src/lib/validate-
+# manifest.ts:288). These are declarative only — arc enforces none of them at
+# runtime — so they are worth writing accurately or not at all.
 capabilities:
   filesystem:
     read:
-      - "~/.claude/"
-      - "~/Developer/"
+      # Its own tree, and the repo named on engine/install.ts's command line:
+      # that repo's compass.config.yaml, CLAUDE.md, and any SOPs already there
+      # (read first, to decide whether writing one would clobber it).
+      - "<package>/**"
+      - "<install-target>/**"
+    write:
+      # ONLY inside the directory passed to engine/install.ts. Not $HOME, not
+      # ~/.claude, not a sibling repo — held true by that installer's test
+      # "writes nothing outside the target directory".
+      - "<install-target>/sops/*.md"
+      - "<install-target>/CLAUDE.md"
+      - "<install-target>/.githooks/pre-commit"
+      - "<install-target>/.githooks/leak-check.ts"
+      - "<install-target>/.github/workflows/compass-governance.yml"
+  network:
+    - host: api.github.com
+      reason: >-
+        engine/validators/label-check.ts and standards/scripts/sync-labels.ts
+        shell out to `gh label` to read and reconcile a repo's label set.
+    - host: github.com
+      reason: >-
+        The CI workflow written by `engine/install.ts --with-ci` checks
+        compass-core out by pinned SHA to run the validators from a reviewed
+        engine rather than from the governed repo.
   bash:
     allowed: true
     restricted_to:
@@ -49,3 +124,19 @@ capabilities:
       - "gh release *"
       - "git *"
       - "bun *"
+  secrets: []
+  # Empty, and meant literally. compass-core reads exactly two environment
+  # variables, and neither one carries a credential — COMPASS_CONFIG and
+  # CONFIDENTIALITY_DENYLIST_FILE are both FILE PATHS. The denylist file they
+  # can point at is confidential, which is precisely why the value passed here
+  # is a path to something outside the repo and never the patterns themselves.
+  # The GitHub credential `gh` uses is `gh`'s own, from its own keyring;
+  # compass-core never reads, forwards, or wants it, so there is nothing here
+  # for arc to provision.
+  #
+  # (An earlier draft phrased that first sentence with the word "secret"
+  # immediately followed by a colon and an env-var name — and leak-check
+  # flagged this file, correctly, because that is exactly the shape the
+  # credential-assignment rule hunts. Prose ABOUT credentials still has to
+  # dodge the credential grammar. Do not paste the offending phrasing back in
+  # to see it fire; the rule is covered by tests.)

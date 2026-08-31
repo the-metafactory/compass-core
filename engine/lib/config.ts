@@ -21,10 +21,10 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
 /**
- * Zod schema for compass.config.yaml. Every field is optional — callers fall
- * back to documented defaults when a value isn't set. Arrays are validated
- * element-by-element to catch stray non-strings (e.g., an unquoted `yes` that
- * YAML parses as a boolean) before they reach a downstream consumer.
+ * Zod schema for compass.config.yaml. Every field EXCEPT `schema` is optional —
+ * callers fall back to documented defaults when a value isn't set. Arrays are
+ * validated element-by-element to catch stray non-strings (e.g., an unquoted
+ * `yes` that YAML parses as a boolean) before they reach a downstream consumer.
  */
 // Design note: nested objects use strict z.object() (not passthrough) so that
 // typos inside known sections (e.g., org.naem instead of org.name) surface as
@@ -33,7 +33,26 @@ import { z } from "zod";
 // extension mechanism (see `extensions:` block and forward-compat test).
 export const CompassConfigSchema = z
   .object({
-    schema: z.string().optional(),
+    // The one field Zod itself requires, and the reason the "everything is
+    // optional" rule has an exception.
+    //
+    // For every OTHER key, requiredness is owned by config-schema.md and
+    // enforced late, at render time: a SOP interpolates `{{config:key}}`, the
+    // key resolves to nothing, and the installer aborts naming it (exit 6,
+    // UNRESOLVED_PLACEHOLDERS). That machinery is precise, and it is why Zod
+    // can stay permissive about the rest.
+    //
+    // `schema` is outside it. Nothing interpolates `{{config:schema}}` — it is
+    // a version discriminator, not prose input — so the render-time gate can
+    // never fire on it, and config-schema.md called it "Required" while no code
+    // anywhere checked. A discriminator whose whole job is to let a future
+    // compass-core recognise a v2 config cannot itself be optional: absent, it
+    // is indistinguishable from v1, and the version it fails to declare is the
+    // one thing no default can supply. So it is required HERE, at load, where
+    // it is the only place it can be.
+    schema: z.string({
+      error: "required — add `schema: compass-config/v1` (see config-schema.md → Schema header)",
+    }),
     org: z
       .object({
         name: z.string().optional(),

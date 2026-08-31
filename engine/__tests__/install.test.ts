@@ -175,6 +175,17 @@ describe("install.ts — config discovery", () => {
     expect(readdirSync(dir)).toEqual(["compass.config.yaml"]);
   });
 
+  test("a config with no schema header is CONFIG_INVALID, and writes nothing", () => {
+    // The header is the only key rejected at LOAD (exit 5) rather than at
+    // render (exit 6): nothing interpolates it, so the render-time gate below
+    // can never see it.
+    const dir = target("org:\n  name: acme-corp\n");
+    const r = run([dir]);
+    expect(r.exitCode).toBe(EXIT.CONFIG_INVALID);
+    expect(r.stderr).toContain("schema: compass-config/v1");
+    expect(readdirSync(dir)).toEqual(["compass.config.yaml"]);
+  });
+
   test("fails naming the key when a required placeholder key is unset", () => {
     const dir = target("schema: compass-config/v1\nfeatures:\n  id_prefix: F-\n");
     const r = run([dir]);
@@ -356,6 +367,18 @@ describe("install.ts — idempotency", () => {
     expect(r.stdout).toContain("wrote: 0 file(s)");
   });
 
+  test("the copied scanner is idempotent — counted as current, not rewritten", () => {
+    const dir = target();
+    const first = run([dir, "--with-ci"]);
+    expect(first.stdout).toContain(join(".githooks", "leak-check.ts"));
+    const second = run([dir, "--with-ci"]);
+    expect(second.exitCode).toBe(EXIT.OK);
+    // Named in the first run's written list, absent from the second's.
+    expect(second.stdout).not.toContain(`+ ${join(".githooks", "leak-check.ts")}`);
+    expect(second.stdout).toContain("wrote: 0 file(s)");
+    expect(second.stdout).toMatch(/already current: \d+ file\(s\)/);
+  });
+
   test("re-install replaces only the marked block, preserving user bytes", () => {
     const dir = target();
     const above = "# My Project\n\nMy own rules that must survive.\n\n";
@@ -390,6 +413,7 @@ describe("install.ts — idempotency", () => {
 
 describe("install.ts — --with-ci", () => {
   const HOOK = join(".githooks", "pre-commit");
+  const SCANNER = join(".githooks", "leak-check.ts");
   const WORKFLOW = join(".github", "workflows", "compass-governance.yml");
 
   test("installs the hook and the workflow", () => {
@@ -398,6 +422,42 @@ describe("install.ts — --with-ci", () => {
     expect(r.exitCode).toBe(EXIT.OK);
     expect(existsSync(join(dir, HOOK))).toBe(true);
     expect(existsSync(join(dir, WORKFLOW))).toBe(true);
+  });
+
+  test("installs the scanner the hook runs, beside the hook", () => {
+    // The whole defect: the hook shipped, the thing it executes did not.
+    const dir = target();
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    expect(existsSync(join(dir, SCANNER))).toBe(true);
+  });
+
+  test("the installed scanner is byte-identical to the engine's", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    expect(readFileSync(join(dir, SCANNER), "utf8")).toBe(
+      readFileSync(join(REPO, "engine", "validators", "leak-check.ts"), "utf8"),
+    );
+  });
+
+  test("the hook resolves the installed scanner, not an engine path the target lacks", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const hook = readFileSync(join(dir, HOOK), "utf8");
+    expect(hook).toContain('scanner_installed="$repo_root/.githooks/leak-check.ts"');
+    // The engine path must survive as the SECOND arm — compass-core itself and
+    // any repo vendoring the engine still resolve through it.
+    expect(hook).toContain('scanner_engine="$repo_root/engine/validators/leak-check.ts"');
+  });
+
+  test("the copied scanner imports node builtins only — nothing ties it to the engine tree", () => {
+    // This is the property that makes copying it legitimate. A package import
+    // or a relative import added upstream would make the installed copy fail to
+    // start in a target that has no node_modules and no engine/, and it would
+    // fail at commit time, in someone else's repo. Catch it here instead.
+    const src = readFileSync(join(REPO, "engine", "validators", "leak-check.ts"), "utf8");
+    const imports = [...src.matchAll(/^\s*import\s[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
+    expect(imports.length).toBeGreaterThan(0);
+    for (const spec of imports) expect(spec).toMatch(/^node:/);
   });
 
   test("installs neither without the flag", () => {
@@ -547,6 +607,121 @@ describe("install.ts — non-clobber", () => {
     const out = readFileSync(join(dir, "sops", "dev-pipeline.md"), "utf8");
     expect(out).not.toBe("MINE\n");
     expect(out).toContain("trunk");
+  });
+
+  test("refuses a differing existing scanner unless --force", () => {
+    // The copied scanner is a written file like any other: an operator who has
+    // edited their own .githooks/leak-check.ts does not get it silently
+    // replaced, security-relevant or not.
+    const dir = target();
+    const scanner = join(dir, ".githooks", "leak-check.ts");
+    mkdirSync(join(dir, ".githooks"), { recursive: true });
+    writeFileSync(scanner, "// mine\n");
+
+    const r = run([dir, "--with-ci"]);
+    expect(r.exitCode).toBe(EXIT.REFUSED_EXISTING_FILES);
+    expect(r.stderr).toContain("leak-check.ts");
+    expect(readFileSync(scanner, "utf8")).toBe("// mine\n");
+
+    expect(run([dir, "--with-ci", "--force"]).exitCode).toBe(EXIT.OK);
+    expect(readFileSync(scanner, "utf8")).not.toBe("// mine\n");
+  });
+});
+
+/**
+ * The regression that motivated the scanner copy, asserted end to end.
+ *
+ * Before the fix the installed hook resolved `<target>/engine/validators/
+ * leak-check.ts` — a path no installed target has, because the installer never
+ * copied engine/. It therefore took its fail-open "SKIPPED, commit allowed" arm
+ * on every commit, in every governed repo, and exited 0 while scanning nothing.
+ *
+ * These tests run the real hook against a real staged blob. They fail if the
+ * scanner stops being copied, if the hook stops resolving the copy, or if the
+ * fail-open arm ever becomes reachable again in a --with-ci install.
+ */
+describe("install.ts — the installed hook actually gates", () => {
+  /** A syntactically valid, well-known-fake AWS key id. Matches `aws-access-key-id`. */
+  const FAKE_AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE";
+
+  function git(dir: string, ...args: string[]): void {
+    const r = Bun.spawnSync(["git", ...args], { cwd: dir });
+    if (r.exitCode !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${new TextDecoder().decode(r.stderr)}`);
+    }
+  }
+
+  /** A --with-ci install inside a real git repo, with `staged` staged. */
+  function governedRepo(staged: string): string {
+    const dir = target();
+    git(dir, "init", "-q");
+    git(dir, "config", "user.email", "test@example.invalid");
+    git(dir, "config", "user.name", "compass test");
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    writeFileSync(join(dir, "staged.txt"), staged);
+    git(dir, "add", "staged.txt");
+    return dir;
+  }
+
+  function runHook(dir: string): RunResult {
+    const proc = Bun.spawnSync(["sh", join(".githooks", "pre-commit")], { cwd: dir });
+    return {
+      exitCode: proc.exitCode ?? -1,
+      stdout: new TextDecoder().decode(proc.stdout),
+      stderr: new TextDecoder().decode(proc.stderr),
+    };
+  }
+
+  test("blocks a staged credential — exit 1, naming the rule that fired", () => {
+    const r = runHook(governedRepo(`aws_key = ${FAKE_AWS_KEY}\n`));
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("aws-access-key-id");
+    expect(r.stdout + r.stderr).toContain("staged.txt");
+  });
+
+  test("the scanner-absent fail-open arm is unreachable in a --with-ci install", () => {
+    const r = runHook(governedRepo(`aws_key = ${FAKE_AWS_KEY}\n`));
+    expect(r.stderr).not.toContain("SKIPPED");
+    expect(r.stderr).not.toContain("commit allowed");
+  });
+
+  test("never echoes the matched credential — a hook's output is public", () => {
+    const r = runHook(governedRepo(`aws_key = ${FAKE_AWS_KEY}\n`));
+    expect(r.stdout + r.stderr).not.toContain(FAKE_AWS_KEY);
+  });
+
+  test("git commit itself is refused, not merely the hook run by hand", () => {
+    const dir = governedRepo(`aws_key = ${FAKE_AWS_KEY}\n`);
+    git(dir, "config", "core.hooksPath", ".githooks");
+    const commit = Bun.spawnSync(["git", "commit", "-m", "leak"], { cwd: dir });
+    expect(commit.exitCode).not.toBe(0);
+    // And nothing landed.
+    const log = Bun.spawnSync(["git", "log", "--oneline"], { cwd: dir });
+    expect(new TextDecoder().decode(log.stdout).trim()).toBe("");
+  });
+
+  test("a clean staged file still commits — the gate blocks findings, not work", () => {
+    const dir = governedRepo("nothing to see here\n");
+    git(dir, "config", "core.hooksPath", ".githooks");
+    expect(runHook(dir).exitCode).toBe(0);
+    const commit = Bun.spawnSync(["git", "commit", "-m", "clean"], { cwd: dir });
+    expect(commit.exitCode).toBe(0);
+  });
+
+  test("the install's own files do not trip the gate", () => {
+    // The scanner is now a file in every governed repo, and that repo's gate
+    // scans it — a page of credential regexes reading its own source. It comes
+    // out clean today (the patterns need 16 trailing characters the source
+    // never supplies). A future rule written less carefully would block the
+    // first commit after install, in someone else's repo, for no reason they
+    // could act on.
+    const dir = target();
+    git(dir, "init", "-q");
+    git(dir, "config", "user.email", "test@example.invalid");
+    git(dir, "config", "user.name", "compass test");
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    git(dir, "add", "-A");
+    expect(runHook(dir).exitCode).toBe(0);
   });
 });
 

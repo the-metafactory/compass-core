@@ -12,7 +12,9 @@ See `compass.config.example.yaml` in the compass-core root for a working example
 schema: compass-config/v1
 ```
 
-Required. compass-core uses this to detect schema version. Today only `v1` exists.
+Required, and the only key in this document that the **Zod schema itself** rejects you for omitting — `loadConfigFrom()` fails the config outright, and the installer exits 5 (`CONFIG_INVALID`) naming this key. Today only `v1` exists.
+
+Every other key here is "required" in the sense described under [Resolution rule for an unset key](#resolution-rule-for-an-unset-key): Zod leaves it optional, and the installer fails late, when a SOP interpolates it and the value turns out not to exist. `schema` cannot work that way — nothing interpolates `{{config:schema}}`, because it is a version discriminator rather than prose input, so the late gate can never fire on it. It is checked at load instead. A discriminator that may be absent does not discriminate: a missing `schema` is indistinguishable from `compass-config/v1`, and the version it declines to state is the one fact no default can supply on its behalf.
 
 ---
 
@@ -219,7 +221,7 @@ A SOP may supply its own phrasing for a key that a given project leaves unset:
 
 ### Resolution rule for an unset key
 
-Every field is optional in the Zod schema, so *required* here means required by this document. In order:
+Every field is optional in the Zod schema — every field except [`schema`](#schema-header), which is rejected at load — so *required* here means required by this document, and enforced at render time rather than at load. In order:
 
 1. **Inline fallback** — if the source supplies `|phrasing`, that wins.
 2. **Documented default** — keys with a default in the tables above render it. The installer **reports** every default it applied; defaults are applied, never applied silently.
