@@ -1,0 +1,82 @@
+#!/bin/sh
+# pre-commit — run the confidentiality/credential scanner over the staged changes.
+#
+# ACTIVATION (per clone, once):
+#     git config core.hooksPath .githooks
+#
+# This hook is PUBLIC. The patterns it enforces do not have to be:
+#
+#     export CONFIDENTIALITY_DENYLIST="$HOME/.config/compass/denylist.txt"
+#
+# points the scanner at an operator-owned pattern file that lives OUTSIDE the
+# repo — one regex per line, `#` comments ignored. The guard is shared through
+# this file; each operator's sensitive strings never enter the repository. With
+# the variable unset, only the built-in generic credential rules run.
+#
+# The scanner reports `file:line: rule-name` and never prints matched content
+# (sops/confidentiality-gate.md §0, the never-quote rule). Open the locations it
+# names; do not paste what you find into a commit message, a PR, or a chat.
+#
+# THE NAME IS SHARED WITH THE SOP, THE CONTRACT IS NOT
+# -----------------------------------------------------
+# sops/confidentiality-gate.md (§0, §2) uses CONFIDENTIALITY_DENYLIST for an org
+# CI secret carrying the HASHED denylist payload, read by a gate engine that also
+# holds a separate pepper secret. This repo ships none of that. leak-check
+# implements only the SOP's PLAINTEXT "local gate" capability, so here the same
+# variable names a FILE PATH containing plaintext regexes — one per line.
+#
+# Point it at a SOP-shaped hashed payload and you get "pattern file not found",
+# a warning, and exit 0: a silent fail-open on exactly the terms you meant to
+# guard. Pass --require-patterns to turn that into a hard error. A rename to
+# CONFIDENTIALITY_DENYLIST_FILE is planned to end the collision; until then the
+# two contracts share a name and differ in meaning, and this comment is the only
+# place that says so out loud.
+#
+# FAIL-OPEN, DELIBERATELY
+# -----------------------
+# Missing tooling (no bun, no scanner) prints how to fix it and exits 0 — the
+# commit proceeds. This is a considered trade, not an oversight: a hook that
+# bricks every commit for a reason unrelated to the commit gets deleted, and a
+# deleted hook protects nothing. Fail-open on TOOLING, fail-closed on FINDINGS —
+# once the scanner runs, its exit code is this hook's exit code, and no
+# `--no-verify` habit is condoned by that. The authoritative gate is CI, which
+# controls its own runtime and does not degrade.
+
+# Note: no `set -e` — this hook inspects the scanner's exit code deliberately.
+set -u
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "pre-commit: not inside a git repository — skipping leak-check." >&2
+  exit 0
+}
+
+scanner="$repo_root/engine/validators/leak-check.ts"
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "pre-commit: bun not found — leak-check SKIPPED, commit allowed." >&2
+  echo "            Install it (https://bun.sh) to re-arm this hook:" >&2
+  echo "              curl -fsSL https://bun.sh/install | bash" >&2
+  exit 0
+fi
+
+if [ ! -f "$scanner" ]; then
+  echo "pre-commit: $scanner not found — leak-check SKIPPED, commit allowed." >&2
+  echo "            Install the governance engine into this repo to re-arm the hook." >&2
+  exit 0
+fi
+
+# CONFIDENTIALITY_DENYLIST is read from the environment by the scanner itself.
+if bun "$scanner" --staged; then
+  status=0
+else
+  status=$?
+fi
+
+if [ "$status" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-commit: leak-check failed (exit $status) — commit blocked." >&2
+  echo "            Fix the flagged locations. If a finding is genuinely public and inert," >&2
+  echo "            resolve it in the source or the pattern file, not with --no-verify." >&2
+fi
+
+exit "$status"
