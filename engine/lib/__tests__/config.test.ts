@@ -245,3 +245,36 @@ labels:
     }
   });
 });
+
+describe("channels", () => {
+  test("parses the channels block", () => {
+    const yaml = `
+schema: compass-config/v1
+channels:
+  team: "#eng-internal"
+  public: "#community"
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    const cfg = loadConfig();
+    expect(cfg!.channels?.team).toBe("#eng-internal");
+    expect(cfg!.channels?.public).toBe("#community");
+  });
+
+  test("rejects a non-string channels.team", () => {
+    const yaml = `
+schema: compass-config/v1
+channels:
+  team: 42
+`;
+    writeFileSync(join(tmp, "compass.config.yaml"), yaml);
+    process.chdir(tmp);
+    expect(() => loadConfig()).toThrow(/channels\.team/);
+  });
+
+  test("an absent channels block is fine — the SOPs fall back to plain prose", () => {
+    writeFileSync(join(tmp, "compass.config.yaml"), "schema: compass-config/v1\n");
+    process.chdir(tmp);
+    expect(loadConfig()!.channels).toBeUndefined();
+  });
+});
