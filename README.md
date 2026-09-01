@@ -2,7 +2,7 @@
 
 Reusable governance engine for Claude Code projects. Ships SOPs, validators, a governance skill, a governance subagent, and a CLAUDE.md template. Install it into a target repo with `bun engine/install.ts <dir>`, which renders the SOPs against that repo's config; the package itself is distributed via [arc](https://github.com/the-metafactory/arc).
 
-> **Status:** v0.4.0 — Phase D. SOPs are de-metafactorized (Phase B), validators are parameterized via `compass.config.yaml` (Phase C), and the placeholder grammar is consistent end-to-end (Phase D).
+> **Status:** v0.5.0 — arc-installable. SOPs are de-metafactorized (Phase B), validators are parameterized via `compass.config.yaml` (Phase C), and the placeholder grammar is consistent end-to-end (Phase D).
 
 ## What you get
 
