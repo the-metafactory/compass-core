@@ -14,6 +14,7 @@
 - NEVER fabricate file names, class names, or architecture. If unsure, read the source.
 - Fix ALL errors found during type checks, tests, or linting -- even if pre-existing or introduced by another developer. Never dismiss errors as "not from our changes." If you see it, fix it.
 - Before fixing a bug or implementing a feature, ALWAYS check open PRs (`gh pr list`) and issues (`gh issue list`) first. Someone may already be working on it, or there may be a PR ready to merge that addresses it. Don't duplicate work -- review what exists before racing to write code.
+- When a decision or answer is required from the principal to proceed, present it as a multi-choice question through the client's question UI (Claude Code: the AskUserQuestion tool) with a recommended option marked -- not as prose questions buried in output. One question per genuine fork; carry the trade-off in each option's description; free-text stays available via the built-in "Other". Decide routine matters yourself and note them in one line -- reserve questions for decisions that are expensive to reverse or genuinely the principal's to make.
 
 <!-- inject:after:critical-rules -->
 
