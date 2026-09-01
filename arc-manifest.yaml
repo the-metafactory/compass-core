@@ -2,7 +2,7 @@
 #
 # WHAT ARC DOES WITH THIS PACKAGE, EXACTLY
 # ----------------------------------------
-# It fetches it, and it symlinks the two `provides.files` drops declared
+# It fetches it, and it symlinks the three `provides.files` drops declared
 # below into ~/.claude. That is the whole contract.
 #
 #     arc install @the-metafactory/compass-core   # puts the package in the store
@@ -36,8 +36,9 @@
 #     `{ trigger }[]`, read only by `arc info`'s printer — never by the
 #     linker. Both are gone rather than reshaped: a declaration whose only
 #     effect is to make a reader believe an install happened is worse than
-#     silence. claude/skills/governance and claude/agents/governance.md now
-#     reach ~/.claude through `provides.files` below — a key arc DOES honor,
+#     silence. claude/skills/governance, claude/skills/plan-breakdown and
+#     claude/agents/governance.md now reach ~/.claude through `provides.files`
+#     below — a key arc DOES honor,
 #     for every package type (arc v0.45.0: src/lib/artifact-installer.ts:324,
 #     the type-agnostic provides.files pass, arc#84) — an install-time
 #     symlink, declared, not a manual copy.
@@ -71,13 +72,13 @@ name: "@the-metafactory/compass-core"
 # attached, and it belongs to a release, not to a defect fix whose subject is
 # clobbering. Left loud, and left failing validation on purpose, rather than
 # changed quietly here.
-version: 0.5.0
+version: 0.6.0
 type: governance
 tier: official
 description: >-
   Reusable governance engine for Claude Code projects — SOPs, validators,
-  governance skill + subagent, CLAUDE.md template. arc install fetches the
-  package; install it into a repo with
+  governance + plan-breakdown skills, governance subagent, CLAUDE.md
+  template. arc install fetches the package; install it into a repo with
   `bun <store-path>/engine/install.ts <your-repo> [--with-ci]`.
 author:
   name: the-metafactory
@@ -87,12 +88,14 @@ license: MIT
 
 # Install-time drops (arc#361): arc symlinks each source to its target via the
 # type-agnostic provides.files pass, honored for every package type since
-# v0.45.0 (arc: src/lib/artifact-installer.ts:324, arc#84). These two entries
+# v0.45.0 (arc: src/lib/artifact-installer.ts:324, arc#84). These three entries
 # are the ONLY things arc installs from this package.
 provides:
   files:
     - source: claude/skills/governance
       target: ~/.claude/skills/Governance
+    - source: claude/skills/plan-breakdown
+      target: ~/.claude/skills/plan-breakdown
     - source: claude/agents/governance.md
       target: ~/.claude/agents/governance.md
 

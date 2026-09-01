@@ -1,6 +1,6 @@
 {
   "name": "@the-metafactory/compass-core",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "Reusable governance engine for Claude Code projects — SOPs, validators, governance skill + subagent, CLAUDE.md template",
