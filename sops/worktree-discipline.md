@@ -16,6 +16,7 @@ Where `{type}` is one of `feat` (new feature), `fix` (bug fix), `infra` (tooling
 Verify before proceeding:
 - You are NOT switching branches in the main worktree
 - The worktree directory does not already exist
+- You have chosen a placement your session can actually enter (see § Placement)
 
 ---
 
@@ -31,7 +32,37 @@ When two agents share a worktree, they can conflict by:
 
 **Never switch branches or stash in the main worktree when another agent might be active.** Use `git worktree` for all feature work instead.
 
+## Placement
+
+Where the worktree goes is a precondition, not a preference. Choose once, before `git worktree add`:
+
+| Placement | Path | Precondition |
+|-----------|------|--------------|
+| **Sibling** (default) | `../{repo}-{slug}` | The session can read and write sibling directories |
+| **In-repo** | `.claude/worktrees/{slug}` | Always available; the directory must be gitignored |
+
+Sibling is the default because it keeps the repo tree clean. It is not universally available: a session sandboxed to its working directory creates the sibling directory successfully and then cannot enter it — `git worktree add` succeeds, and every command after it fails. Test the precondition rather than assuming it:
+
+```bash
+ls .. >/dev/null 2>&1 && echo "sibling ok" || echo "use in-repo"
+```
+
+If the session cannot read `..`, put the worktree **inside** the working directory:
+
+```bash
+git worktree add .claude/worktrees/{slug} -b {type}/{branch-name} origin/{{config:org.default_branch}}
+```
+
+In Claude Code, prefer the built-in **EnterWorktree** tool over the raw command — it creates the worktree under `.claude/worktrees/` and moves the session into it, which is exactly the placement a confined session needs. Restricted permission modes (including the default auto mode) are the case this exists for.
+
+**In-repo worktrees carry one hazard: `git add -A` stages a nested worktree as a gitlink** — a submodule-shaped entry nobody intended, in a commit nobody reviewed. Where in-repo worktrees exist:
+
+- Gitignore the worktree directory (`.claude/worktrees/`).
+- Stage explicit paths. Never `git add -A`.
+
 ## Setup
+
+The commands below use the sibling path; substitute `.claude/worktrees/{slug}` throughout if § Placement sent you in-repo.
 
 ```bash
 # From the repo root, create a worktree for your feature:
@@ -57,9 +88,9 @@ git worktree add ../myapp-ci-cache -b infra/f-210-ci-cache origin/main
 
 ## Naming Conventions
 
-- Worktree directories go in sibling directories: `../{repo}-{slug}`
+- Worktree directories follow the placement chosen in § Placement: `../{repo}-{slug}` when the session can reach sibling directories, `.claude/worktrees/{slug}` when it cannot
 - The slug should match the branch name's slug portion (minus the `{type}/` prefix)
-- Examples: `../myapp-auth`, `../myapp-search-index`, `../myapp-billing-fix`
+- Examples: `../myapp-auth`, `../myapp-search-index`, `../myapp-billing-fix`; in-repo, `.claude/worktrees/auth`
 - Branch prefix matches the change type: `feat/`, `fix/`, `infra/`, `docs/`, `chore/`. The prefix shows up in commit messages and the PR list — use it consistently.
 
 ## Working Rules
@@ -139,9 +170,11 @@ git pull origin {{config:org.default_branch}}
 
 | Action | Command |
 |--------|---------|
-| Create worktree | `git worktree add ../{repo}-{slug} -b {type}/{branch} origin/{{config:org.default_branch}}` |
+| Test the sibling precondition | `ls .. >/dev/null 2>&1` |
+| Create worktree (sibling — needs sibling access) | `git worktree add ../{repo}-{slug} -b {type}/{branch} origin/{{config:org.default_branch}}` |
+| Create worktree (in-repo — session confined to CWD) | `git worktree add .claude/worktrees/{slug} -b {type}/{branch} origin/{{config:org.default_branch}}` (Claude Code: the EnterWorktree tool) |
 | List worktrees | `git worktree list` |
-| Remove worktree | `git worktree remove ../{repo}-{slug}` |
+| Remove worktree | `git worktree remove ../{repo}-{slug}` (or `.claude/worktrees/{slug}`) |
 | Prune stale worktrees | `git worktree prune` |
 | Delete local branch (merged) | `git branch -d {type}/{branch}` |
 | Delete local branch (force, post-squash-merge) | `git branch -D {type}/{branch}` |

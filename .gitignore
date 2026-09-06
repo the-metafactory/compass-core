@@ -5,3 +5,6 @@ dist/
 .env
 .env.local
 .compass-cache/
+# In-repo worktrees (sops/worktree-discipline.md § Placement). Ignored so a
+# stray `git add -A` cannot stage one as a gitlink.
+.claude/worktrees/

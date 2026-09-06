@@ -754,3 +754,57 @@ describe("install.ts — optional placeholder rendering", () => {
     expect(out).toContain("the team channel");
   });
 });
+
+/**
+ * Regression guard for compass-core#23. The sibling worktree pattern
+ * (`../{repo}-{slug}`) is not universally available: a session confined to its
+ * working directory creates a worktree it then cannot enter. Field-reported on
+ * a bare Claude auto-mode install, so a fresh `arc install` operator gets the
+ * precondition, not just the pattern. These pin the guidance in place — both in
+ * the rendered SOP that every governed repo receives, and in the template the
+ * new-repo workflow copies.
+ */
+describe("worktree placement is harness-aware (#23)", () => {
+  const sop = (dir: string) =>
+    readFileSync(join(dir, "sops", "worktree-discipline.md"), "utf8");
+
+  test("the rendered SOP states the sibling pattern's precondition", () => {
+    const dir = target();
+    expect(run([dir]).exitCode).toBe(EXIT.OK);
+    const out = sop(dir);
+    expect(out).toContain("## Placement");
+    // The precondition itself, and the one command that tests it.
+    expect(out).toContain("read and write sibling directories");
+    expect(out).toContain("ls ..");
+  });
+
+  test("the rendered SOP names the in-repo pattern for a confined session", () => {
+    const dir = target();
+    run([dir]);
+    const out = sop(dir);
+    expect(out).toContain(".claude/worktrees/");
+    expect(out).toContain("EnterWorktree");
+    // The hazard that in-repo worktrees create, and its rule.
+    expect(out).toContain("git add -A");
+    expect(out).toContain("gitignore");
+  });
+
+  test("the SOP quick reference carries both patterns with preconditions", () => {
+    const dir = target();
+    run([dir]);
+    const table = sop(dir).slice(sop(dir).indexOf("## Quick Reference"));
+    expect(table).toContain("Create worktree (sibling");
+    expect(table).toContain("Create worktree (in-repo");
+  });
+
+  test("the CLAUDE.md template carries the Claude-specific placement guidance", () => {
+    const tpl = readFileSync(join(REPO, "templates", "CLAUDE.md.template"), "utf8");
+    const section = tpl.slice(tpl.indexOf("## Multi-Agent Worktree Discipline"));
+    expect(section).toContain("EnterWorktree");
+    expect(section).toContain(".claude/worktrees/");
+    expect(section).toContain("git add -A");
+    // The configured pattern must be presented as conditional, never bare.
+    expect(section).toContain("{{config:features.worktree_pattern}}");
+    expect(section).toContain("only when the session can read the parent directory");
+  });
+});

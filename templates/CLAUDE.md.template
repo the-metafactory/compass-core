@@ -98,8 +98,11 @@ See `{{template:sops_path}}/versioning.md` for the full procedure. Key repo-spec
 
 See `{{template:sops_path}}/worktree-discipline.md` for the full procedure. Key repo-specific details:
 
-- Worktree directory pattern: `{{config:features.worktree_pattern}}`
+- Worktree directory pattern: `{{config:features.worktree_pattern}}` -- the sibling default, usable **only when the session can read the parent directory**. Test it (`ls ..`) before relying on it; a sandboxed session creates the directory and then cannot enter it.
 - Example: `git worktree add {{config:features.worktree_pattern}} -b {{config:features.branch_pattern}} {{config:org.default_branch}}`
+- Under a restricted permission mode (including Claude Code's default auto mode), prefer the built-in **EnterWorktree** tool instead. It places the worktree under `.claude/worktrees/` inside the working directory, where the session can actually reach it.
+- Never `git worktree add` a sibling path the session cannot read.
+- Where in-repo worktrees exist, never `git add -A` -- it stages a nested worktree as a gitlink. Stage explicit paths, and keep `.claude/worktrees/` in `.gitignore`.
 
 ## Bun
 
