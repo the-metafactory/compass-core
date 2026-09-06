@@ -9,9 +9,9 @@
 
 After reading this SOP, output:
 ```
-SOP: worktree | Worktree: ../{repo}-{slug} | Branch: {type}/{name} | Main: untouched
+SOP: worktree | Placement: {placement} | Worktree: {path} | Branch: {type}/{name} | Main: untouched
 ```
-Where `{type}` is one of `feat` (new feature), `fix` (bug fix), `infra` (tooling/CI), `docs` (documentation), `chore` (version bumps, metadata). The default for new feature work is `{{config:features.commit_prefix}}`.
+Where `{placement}` is `sibling` or `in-repo` and `{path}` is the path you actually chose — report the decision, not the default, so a wrong placement is visible in the line rather than three commands later. Where `{type}` is one of `feat` (new feature), `fix` (bug fix), `infra` (tooling/CI), `docs` (documentation), `chore` (version bumps, metadata). The default for new feature work is `{{config:features.commit_prefix}}`.
 
 Verify before proceeding:
 - You are NOT switching branches in the main worktree
@@ -38,22 +38,35 @@ Where the worktree goes is a precondition, not a preference. Choose once, before
 
 | Placement | Path | Precondition |
 |-----------|------|--------------|
-| **Sibling** (default) | `../{repo}-{slug}` | The session can read and write sibling directories |
+| **Sibling** (default) | `../{repo}-{slug}` | The session can read and write sibling directories **and reach them with its own file tools** — only the first half is testable |
 | **In-repo** | `.claude/worktrees/{slug}` | Always available; the directory must be gitignored |
 
-Sibling is the default because it keeps the repo tree clean. It is not universally available: a session sandboxed to its working directory creates the sibling directory successfully and then cannot enter it — `git worktree add` succeeds, and every command after it fails. Test the precondition rather than assuming it:
+Sibling is the default because it keeps the repo tree clean. It is not universally available: a session sandboxed to its working directory creates the sibling directory successfully and then cannot enter it — `git worktree add` succeeds, and every command after it fails.
+
+**In Claude Code under any restricted or unattended permission mode, skip the probe entirely and use the built-in EnterWorktree tool.** That covers the default auto mode, any permission mode short of full access, and every harness-spawned agent. Those sessions are confined by construction — there is nothing to find out.
+
+Everywhere else, probe — but read the result correctly, because **the probe is one-way**. Failure is conclusive: the sibling placement is unusable. A pass proves only that the *shell* can write and enter the parent, and success is not proof the placement will work: a harness can permit exactly that while still blocking the session from `cd`-ing there, or from reading and editing files there with its own file tools. This is not hypothetical — the session that produced this rule ran `git worktree add ../…`, a parent-directory write, and was boxed in regardless. No shell command can see the file-tool boundary, because that boundary is not in the shell.
 
 ```bash
-ls .. >/dev/null 2>&1 && echo "sibling ok" || echo "use in-repo"
+# One-way. A failure rules the sibling placement out; a pass rules nothing in.
+mkdir -p ../.wt-probe && (cd ../.wt-probe) && rmdir ../.wt-probe
 ```
 
-If the session cannot read `..`, put the worktree **inside** the working directory:
+When the probe fails — or whenever you are unsure — put the worktree **inside** the working directory:
 
 ```bash
 git worktree add .claude/worktrees/{slug} -b {type}/{branch-name} origin/{{config:org.default_branch}}
 ```
 
-In Claude Code, prefer the built-in **EnterWorktree** tool over the raw command — it creates the worktree under `.claude/worktrees/` and moves the session into it, which is exactly the placement a confined session needs. Restricted permission modes (including the default auto mode) are the case this exists for.
+In Claude Code, prefer the built-in **EnterWorktree** tool over that raw command: it creates the worktree under `.claude/worktrees/` and moves the session into it in one step. Name the worktree `{type}/{slug}` — that name becomes the branch, so it is what keeps the result matching the dev-pipeline convention.
+
+**Recovery.** If any command is blocked *after* you created a sibling worktree, you are in the failure this section exists to prevent. Do not work around it one command at a time — remove the half-made sibling, then redo it in-repo:
+
+```bash
+git worktree remove ../{repo}-{slug}
+```
+
+A half-made sibling left on disk also collides with the next `git worktree add` for the same slug.
 
 **In-repo worktrees carry one hazard: `git add -A` stages a nested worktree as a gitlink** — a submodule-shaped entry nobody intended, in a commit nobody reviewed. Where in-repo worktrees exist:
 
@@ -112,6 +125,8 @@ on it silently duplicates work already pushed to the PR (and can clobber it).
 gh pr checkout {N}                       # checks out the PR head into a tracking branch
 #   or, for a worktree:
 git fetch origin pull/{N}/head && git worktree add ../{repo}-pr{N} FETCH_HEAD
+#   in-repo placement (see § Placement):
+git fetch origin pull/{N}/head && git worktree add .claude/worktrees/pr{N} FETCH_HEAD
 ```
 
 Before adding your commit, confirm the base: `git log --oneline -1` should match
@@ -170,9 +185,10 @@ git pull origin {{config:org.default_branch}}
 
 | Action | Command |
 |--------|---------|
-| Test the sibling precondition | `ls .. >/dev/null 2>&1` |
+| Probe the sibling precondition (one-way — a pass rules nothing in) | `mkdir -p ../.wt-probe && (cd ../.wt-probe) && rmdir ../.wt-probe` |
 | Create worktree (sibling — needs sibling access) | `git worktree add ../{repo}-{slug} -b {type}/{branch} origin/{{config:org.default_branch}}` |
-| Create worktree (in-repo — session confined to CWD) | `git worktree add .claude/worktrees/{slug} -b {type}/{branch} origin/{{config:org.default_branch}}` (Claude Code: the EnterWorktree tool) |
+| Create worktree (in-repo — confined, unattended, or unsure) | `git worktree add .claude/worktrees/{slug} -b {type}/{branch} origin/{{config:org.default_branch}}` (Claude Code: the EnterWorktree tool, named `{type}/{slug}`) |
+| Recover from a blocked sibling | `git worktree remove ../{repo}-{slug}`, then redo it in-repo |
 | List worktrees | `git worktree list` |
 | Remove worktree | `git worktree remove ../{repo}-{slug}` (or `.claude/worktrees/{slug}`) |
 | Prune stale worktrees | `git worktree prune` |

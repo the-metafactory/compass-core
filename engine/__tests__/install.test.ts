@@ -763,6 +763,13 @@ describe("install.ts — optional placeholder rendering", () => {
  * precondition, not just the pattern. These pin the guidance in place — both in
  * the rendered SOP that every governed repo receives, and in the template the
  * new-repo workflow copies.
+ *
+ * The probe's ONE-WAY property is the load-bearing part, and the reason the
+ * first draft of this fix was wrong. The field report's session successfully
+ * ran `git worktree add ../…` — a parent-directory WRITE through bash — and was
+ * still boxed in, because the harness bounded its cd/Read/Edit scope, a
+ * different layer from the one any shell command can reach. So a passing probe
+ * proves nothing, and the SOP must say so in the same breath as the command.
  */
 describe("worktree placement is harness-aware (#23)", () => {
   const sop = (dir: string) =>
@@ -773,9 +780,43 @@ describe("worktree placement is harness-aware (#23)", () => {
     expect(run([dir]).exitCode).toBe(EXIT.OK);
     const out = sop(dir);
     expect(out).toContain("## Placement");
-    // The precondition itself, and the one command that tests it.
     expect(out).toContain("read and write sibling directories");
-    expect(out).toContain("ls ..");
+    // The probe tests write+enter, not merely read: a parent read passing is
+    // exactly what misled the first draft.
+    expect(out).toContain("mkdir -p ../.wt-probe");
+    expect(out).toContain("(cd ../.wt-probe)");
+    expect(out).toContain("rmdir ../.wt-probe");
+  });
+
+  test("the probe is stated as one-way — failure conclusive, success is not", () => {
+    const dir = target();
+    run([dir]);
+    const out = sop(dir);
+    expect(out).toContain("one-way");
+    expect(out).toContain("Failure is conclusive");
+    expect(out).toContain("success is not");
+    // The reason success proves nothing: the boundary the probe cannot see.
+    expect(out).toContain("file-tool");
+    // A bare `ls ..` read-only probe must not survive as the recommendation.
+    expect(out).not.toContain('ls .. >/dev/null 2>&1 && echo "sibling ok"');
+  });
+
+  test("Claude Code under a restricted mode skips the probe entirely", () => {
+    const dir = target();
+    run([dir]);
+    const out = sop(dir);
+    expect(out).toContain("skip the probe");
+    expect(out).toContain("EnterWorktree");
+    expect(out).toContain("unattended");
+  });
+
+  test("the rendered SOP gives the recovery path from a half-made sibling", () => {
+    const dir = target();
+    run([dir]);
+    const out = sop(dir);
+    expect(out).toContain("git worktree remove");
+    expect(out).toContain("half-made");
+    expect(out).toContain("redo it in-repo");
   });
 
   test("the rendered SOP names the in-repo pattern for a confined session", () => {
@@ -787,6 +828,26 @@ describe("worktree placement is harness-aware (#23)", () => {
     // The hazard that in-repo worktrees create, and its rule.
     expect(out).toContain("git add -A");
     expect(out).toContain("gitignore");
+    // EnterWorktree's name becomes the branch — it must match dev-pipeline.
+    expect(out).toContain("{type}/{slug}");
+  });
+
+  test("the pre-flight line reports the chosen placement, not a fixed path", () => {
+    const dir = target();
+    run([dir]);
+    const preflight = sop(dir).slice(0, sop(dir).indexOf("## The Problem"));
+    expect(preflight).toContain("{placement}");
+    // The old line asserted the sibling path as the only answer.
+    expect(preflight).not.toContain("Worktree: ../{repo}-{slug}");
+  });
+
+  test("the PR-basing command carries the in-repo alternative", () => {
+    const dir = target();
+    run([dir]);
+    const section = sop(dir).slice(sop(dir).indexOf("## Basing a worktree on an existing PR"));
+    expect(section.slice(0, section.indexOf("## Cleanup"))).toContain(
+      ".claude/worktrees/pr{N}",
+    );
   });
 
   test("the SOP quick reference carries both patterns with preconditions", () => {
@@ -795,6 +856,7 @@ describe("worktree placement is harness-aware (#23)", () => {
     const table = sop(dir).slice(sop(dir).indexOf("## Quick Reference"));
     expect(table).toContain("Create worktree (sibling");
     expect(table).toContain("Create worktree (in-repo");
+    expect(table).toContain("Recover from a blocked sibling");
   });
 
   test("the CLAUDE.md template carries the Claude-specific placement guidance", () => {
@@ -806,5 +868,26 @@ describe("worktree placement is harness-aware (#23)", () => {
     // The configured pattern must be presented as conditional, never bare.
     expect(section).toContain("{{config:features.worktree_pattern}}");
     expect(section).toContain("only when the session can read the parent directory");
+    // The same one-way + skip-the-probe rules the SOP carries.
+    expect(section).toContain("one-way");
+    expect(section).toContain("skip the probe");
+    expect(section).toContain("{type}/{slug}");
+    expect(section).toContain("git worktree remove");
+  });
+
+  test("the template pre-flight example reports the chosen placement", () => {
+    const tpl = readFileSync(join(REPO, "templates", "CLAUDE.md.template"), "utf8");
+    expect(tpl).toContain("SOP: worktree | Placement:");
+    // The old line hardcoded the sibling pattern as the output.
+    expect(tpl).not.toContain(
+      "Worktree: {{config:features.worktree_pattern}} | Branch:",
+    );
+  });
+
+  test("the CLAUDE.md block labels the worktree pattern with its precondition", () => {
+    const dir = target();
+    run([dir]);
+    const claude = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+    expect(claude).toContain("worktree-discipline § Placement");
   });
 });

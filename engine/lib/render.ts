@@ -408,7 +408,13 @@ export function buildClaudeBlock(config: CompassConfig, sopFiles: string[]): str
   };
   push("Default branch", "org.default_branch");
   push("Feature branch pattern", "features.branch_pattern");
-  push("Worktree pattern", "features.worktree_pattern");
+  // The pattern is the sibling default, and it carries a precondition the value
+  // itself cannot express (compass-core#23). The label points at the section
+  // that states it, so the block never presents the path as unconditional.
+  push(
+    "Worktree pattern (precondition: worktree-discipline § Placement)",
+    "features.worktree_pattern",
+  );
   push("Commit prefix", "features.commit_prefix");
   push("Feature ID prefix", "features.id_prefix");
   push("Version manifest", "versioning.manifest");
