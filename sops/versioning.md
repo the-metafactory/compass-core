@@ -89,6 +89,32 @@ gh release create v0.2.0 \
 
 The `release_title_format` template typically expands placeholders like `{repo}`, `{version}`, and `{description}`. See your repo's `compass.config.yaml` for the exact value.
 
+### compass-core only: bump the engine pin
+
+Skip this section unless the repo you are releasing **is** compass-core.
+
+compass-core's installer bakes `ENGINE_REF` (in `engine/install.ts`) into
+every consumer's `compass-governance.yml` as the commit CI checks out to run
+the validators. Nothing moves it for you. Before step 1, set it to the commit
+SHA of `origin/main` you are releasing from, and commit the bump together
+with the manifest in step 2:
+
+```bash
+git fetch origin
+git rev-parse 'origin/main^{commit}'   # this SHA becomes ENGINE_REF
+# edit engine/install.ts: const ENGINE_REF = "<that SHA>";
+bun test engine/__tests__/engine-ref.test.ts
+```
+
+`ENGINE_REF` is therefore the release tag's **parent** commit on main: a
+commit cannot contain its own SHA, so the bump commit always pins the commit
+before it. The commit the tag itself names (`git rev-parse
+'v<version>^{commit}'`) is what the **next** release's bump will pin. Pin the
+commit, never the annotated tag object. The engine-ref test rejects a tag
+SHA, a pin not reachable from `origin/main`, and a pin whose tree lacks any
+file the workflow template references (plus `package.json` and `bun.lock`,
+which `--frozen-lockfile` needs there).
+
 ### Optional: registry sync extension
 
 Some organizations maintain a central package registry (a `REGISTRY.yaml` or equivalent) that lists every package and its current version, used for discovery and deployment automation. If your organization uses one, configure it in `compass.config.yaml` under the `extensions:` block:
