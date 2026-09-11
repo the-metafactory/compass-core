@@ -11,6 +11,7 @@ Reusable governance engine for Claude Code projects. Ships SOPs, validators, a g
 - `templates/` — File templates for new repos (CLAUDE.md, arc-manifest.yaml)
 - `engine/validators/` — Structural validators (run via `bun engine/validators/*.ts`)
 - `engine/ci/` — CI runners that compose validators
+- `.github/workflows/` — This repo's own gates: `verify.yml` (tests + validators from the checkout) and `compass-governance.yml` (the consumer gate, self-hosted). `compass.config.yaml` at the root is the config they read.
 
 ## Critical Rules
 

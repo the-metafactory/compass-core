@@ -1,0 +1,151 @@
+# verify — compass-core's own gate (issue #27).
+#
+# The engine that gates every consumer had no gate on itself: 176 tests that
+# ran only when someone remembered `bun test`, and validators that were never
+# pointed at this repo. This workflow runs the test suite and the validators
+# against the checkout on every PR and every push to main.
+#
+# It is NOT the consumer gate. That one is .github/workflows/compass-governance.yml
+# beside this file, rendered from templates/workflows/ and running the
+# validators out of a SHA-pinned .compass-engine checkout — the way a consumer
+# sees them. This workflow runs the validators from the checkout itself, so a
+# PR that changes a validator is gated by the validator it changes.
+#
+# fetch-depth: 0 is required, not a nicety. engine/__tests__/engine-ref.test.ts
+# asks git whether ENGINE_REF names a commit reachable from origin/main and
+# whether the pinned tree holds every path the template references; in a
+# shallow clone those checks skip, loudly, and the guard that exists to catch a
+# bad pin catches nothing.
+#
+# Actions are SHA-pinned with the tag in a comment; bun is pinned to an exact
+# version (arc#405 — `latest` re-resolves on a schedule nobody here controls).
+# Bump either deliberately, in a diff that says so.
+
+name: verify
+
+on:
+  pull_request:
+  # Runs on the working branch too, so the wiring can be verified — and a
+  # fault-injected red observed — before a PR exists.
+  push:
+    branches: [main, "feat/**", "fix/**"]
+
+# Keyed on the HEAD SHA so the push run and the pull_request run for one commit
+# collapse into a single run. cancel-in-progress is off for main: main's run is
+# the record of whether the merged state passes, and is never superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Full history: engine-ref.test.ts needs the pinned commit and
+          # origin/main; the leak-check step needs the PR's merge-base.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.2"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: bun test
+        run: bun test
+
+      - name: claude-md-check
+        # compass.config.yaml in the cwd names this repo's required sections.
+        run: bun engine/validators/claude-md-check.ts CLAUDE.md
+
+      # The diff-listing shape below is templates/workflows/compass-governance.yml's,
+      # which already handles the merge-base and the rename case. Two
+      # differences: the scanner runs from this checkout rather than from a
+      # .compass-engine clone (this repo IS the engine), and a push has no PR
+      # base, so it diffs against the previous tip of the branch instead.
+      - name: leak-check (changed files)
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+          DENYLIST: ${{ secrets.CONFIDENTIALITY_DENYLIST }}
+        run: |
+          set -euo pipefail
+
+          # --require-patterns only when a denylist is actually reachable. A fork
+          # PR gets no secrets by design and must run reduced, not fail; a
+          # non-fork run that HAS the secret must refuse to run degraded.
+          REQUIRE=""
+          if [ -n "$DENYLIST" ]; then
+            printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
+            export CONFIDENTIALITY_DENYLIST_FILE="$RUNNER_TEMP/denylist.txt"
+            REQUIRE="--require-patterns"
+          else
+            echo "::notice::No denylist secret available to this run (fork PR, or the secret is not wired) — built-in rules only."
+          fi
+
+          if [ -n "$PR_BASE_SHA" ]; then
+            # Diff from the MERGE-BASE, not the base branch tip. The checkout is
+            # the merge commit, so its files include whatever main has merged
+            # in; a two-dot diff against the base tip lists files only main
+            # touched and fails the PR on somebody else's leak.
+            BASE=$(git merge-base "$PR_BASE_SHA" "$PR_HEAD_SHA")
+            HEAD_SHA="$PR_HEAD_SHA"
+          elif [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            BASE="$PUSH_BEFORE"
+            HEAD_SHA="$PUSH_HEAD"
+          else
+            # A new branch, or a force-push from a commit this clone no longer
+            # has: there is no "before" to diff against, so scan the whole tree.
+            # More than the changed files, never fewer — a skipped scan that
+            # looks like a pass is the failure mode this step must not have.
+            echo "::notice::No previous tip for this push — scanning the full tree."
+            git ls-files -z > "$RUNNER_TEMP/changed.txt"
+            BASE=""
+            HEAD_SHA="$PUSH_HEAD"
+          fi
+
+          if [ -n "$BASE" ]; then
+            # --no-renames + R in the filter, deliberately, and both are load-
+            # carrying: without them a rename-plus-edit is reported as a single
+            # R entry, ACM drops it, and the renamed file — secret and all — is
+            # never scanned.
+            git diff --no-renames --name-only --diff-filter=ACMR -z \
+              "$BASE" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          fi
+
+          # The list names paths as the PR HEAD has them, but the checkout on
+          # disk is the MERGE commit. A file the PR added and the base branch
+          # then deleted is listed and absent — and absent from the merged
+          # result too, so there is nothing to scan and nothing at risk. Drop
+          # those, loudly: leak-check treats a missing path as a usage error.
+          : > "$RUNNER_TEMP/scan.txt"
+          while IFS= read -r -d '' f; do
+            if [ -f "$f" ]; then
+              printf '%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
+            else
+              echo "::notice::$f is in the diff but not in the checked-out tree — not scanned."
+            fi
+          done < "$RUNNER_TEMP/changed.txt"
+
+          if [ ! -s "$RUNNER_TEMP/scan.txt" ]; then
+            echo "No added, modified, or renamed files to scan."
+            exit 0
+          fi
+
+          # NUL-separated throughout: filenames with spaces or newlines survive
+          # intact, and xargs -0 is portable in a way that GNU's -a/-d are not.
+          xargs -0 bun engine/validators/leak-check.ts $REQUIRE \
+            < "$RUNNER_TEMP/scan.txt"
