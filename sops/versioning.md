@@ -91,24 +91,29 @@ The `release_title_format` template typically expands placeholders like `{repo}`
 
 ### compass-core only: bump the engine pin
 
+Skip this section unless the repo you are releasing **is** compass-core.
+
 compass-core's installer bakes `ENGINE_REF` (in `engine/install.ts`) into
 every consumer's `compass-governance.yml` as the commit CI checks out to run
-the validators. Nothing moves it for you. Before step 1, set it to the SHA of
-the `origin/main` commit you are releasing from:
+the validators. Nothing moves it for you. Before step 1, set it to the commit
+SHA of `origin/main` you are releasing from, and commit the bump together
+with the manifest in step 2:
 
 ```bash
 git fetch origin
-git rev-parse origin/main          # this SHA becomes ENGINE_REF
+git rev-parse 'origin/main^{commit}'   # this SHA becomes ENGINE_REF
 # edit engine/install.ts: const ENGINE_REF = "<that SHA>";
 bun test engine/__tests__/engine-ref.test.ts
 ```
 
-The engine-ref test enforces that the pinned commit is on this history and
-contains every `engine/` and `.githooks/` path the workflow template runs. A
-pin that predates a validator the template names ships a gate that fails on a
-missing file to every consumer who installs it — that is the failure the test
-exists to catch. Commit the bump with the manifest in step 2. Repos that only
-consume compass-core skip this section.
+`ENGINE_REF` is therefore the release tag's **parent** commit on main: a
+commit cannot contain its own SHA, so the bump commit always pins the commit
+before it. The commit the tag itself names (`git rev-parse
+'v<version>^{commit}'`) is what the **next** release's bump will pin. Pin the
+commit, never the annotated tag object. The engine-ref test rejects a tag
+SHA, a pin not reachable from `origin/main`, and a pin whose tree lacks any
+file the workflow template references (plus `package.json` and `bun.lock`,
+which `--frozen-lockfile` needs there).
 
 ### Optional: registry sync extension
 
