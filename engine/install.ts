@@ -138,7 +138,7 @@ const SOURCE_WORKFLOW = join(PACKAGE_ROOT, "templates", "workflows", "compass-go
  * workflow file and read what changed, which is the upgrade path the workflow
  * header describes.
  */
-const ENGINE_REF = "1214e7dde76b937d31261c329fe5089fd03aee91";
+const ENGINE_REF = "ea7e03f762d6bb697cab09bf81d7bd5c0667ea2e";
 
 /** Substituted into the workflow template at install time. */
 const TEMPLATE_VALUES: Record<string, string> = {

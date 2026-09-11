@@ -89,6 +89,27 @@ gh release create v0.2.0 \
 
 The `release_title_format` template typically expands placeholders like `{repo}`, `{version}`, and `{description}`. See your repo's `compass.config.yaml` for the exact value.
 
+### compass-core only: bump the engine pin
+
+compass-core's installer bakes `ENGINE_REF` (in `engine/install.ts`) into
+every consumer's `compass-governance.yml` as the commit CI checks out to run
+the validators. Nothing moves it for you. Before step 1, set it to the SHA of
+the `origin/main` commit you are releasing from:
+
+```bash
+git fetch origin
+git rev-parse origin/main          # this SHA becomes ENGINE_REF
+# edit engine/install.ts: const ENGINE_REF = "<that SHA>";
+bun test engine/__tests__/engine-ref.test.ts
+```
+
+The engine-ref test enforces that the pinned commit is on this history and
+contains every `engine/` and `.githooks/` path the workflow template runs. A
+pin that predates a validator the template names ships a gate that fails on a
+missing file to every consumer who installs it — that is the failure the test
+exists to catch. Commit the bump with the manifest in step 2. Repos that only
+consume compass-core skip this section.
+
 ### Optional: registry sync extension
 
 Some organizations maintain a central package registry (a `REGISTRY.yaml` or equivalent) that lists every package and its current version, used for discovery and deployment automation. If your organization uses one, configure it in `compass.config.yaml` under the `extensions:` block:
