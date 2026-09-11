@@ -1,0 +1,50 @@
+# compass.config.yaml — compass-core governed by compass-core.
+#
+# This repo dogfoods its own engine (issue #27). The values here are the ones
+# that are TRUE for this repository, not the example placeholders: the
+# validators in .github/workflows/ read this file from the checkout, so a value
+# that is wrong here makes a gate that is wrong on every PR.
+#
+# Copy compass.config.example.yaml, not this file, when governing another repo.
+# See claude/skills/governance/config-schema.md for what each key means.
+
+schema: compass-config/v1
+
+org:
+  name: the-metafactory
+  display_name: the metafactory
+  default_license: MIT
+  default_branch: main
+
+features:
+  # Work here is tracked by GitHub issue number, not a feature ID, so the branch
+  # pattern carries only the slug (feat/self-ci, fix/engine-ref-pin, ...). The
+  # prefix is required by the schema and is only read by the design-process SOP.
+  id_prefix: F-
+  branch_pattern: "feat/{slug}"
+  worktree_pattern: "../{repo}-{slug}"
+  commit_prefix: feat
+
+labels:
+  # The starter set this repo ships to consumers is also the set it holds
+  # itself. Sync with: bun standards/scripts/sync-labels.ts the-metafactory/compass-core
+  source: standards/labels.example.yaml
+  required:
+    types: [bug, feature, infrastructure, documentation]
+    priorities: [now, next, future]
+
+validators:
+  claude_md:
+    enabled: true
+    required_sections:
+      - Architecture
+      - Critical Rules
+      - Standard Operating Procedures
+      - Dogfooding
+  label_check:
+    enabled: true
+    enforce_required: true
+
+versioning:
+  manifest: arc-manifest.yaml
+  release_title_format: "{repo} v{version} — {description}"

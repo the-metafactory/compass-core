@@ -207,6 +207,9 @@ To delegate a governance task autonomously, invoke the subagent at `claude/agent
 
 ```
 compass-core/
+├── .github/workflows/
+│   ├── verify.yml                    # This repo's own gate: bun test + validators from the checkout
+│   └── compass-governance.yml        # The consumer gate, rendered from templates/ and self-hosted
 ├── claude/
 │   ├── agents/governance.md          # Subagent persona
 │   └── skills/governance/            # Skill + 9 workflows + config schema doc
@@ -219,6 +222,7 @@ compass-core/
 │   ├── validators/                   # CLAUDE.md + label validators + tests
 │   └── ci/run-all.ts                 # CI runner
 ├── compass.config.example.yaml       # Starter config
+├── compass.config.yaml               # This repo's own config — compass-core governed by compass-core
 └── arc-manifest.yaml                 # Arc package manifest
 ```
 
@@ -229,9 +233,15 @@ bun install
 bun test
 ```
 
-142 tests covering the config loader (19), the claude-md validator CLI (6), the
-leak-check scanner (33), the install-time renderer (41), and the installer CLI
-(43).
+176 tests covering the config loader (22), the claude-md validator CLI (6), the
+leak-check scanner (33), the install-time renderer (41), the installer CLI (67)
+and the ENGINE_REF pin guard (7).
+
+CI runs the same suite, plus `claude-md-check` and `leak-check` over the
+changed files, on every PR and every push to `main`
+(`.github/workflows/verify.yml`). The guard needs a full clone, so the workflow
+checks out with `fetch-depth: 0`; in a shallow clone its git-backed checks skip
+and say so.
 
 ## Versioning
 
