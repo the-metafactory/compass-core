@@ -1107,15 +1107,21 @@ describe("leak-check.ts — #42 review F1: not/should/never only suppress a hyph
   });
 
   // Controls: the two factory-fixture shapes this widening exists for must
-  // still pass, both before and after the F1 tightening.
+  // still pass, both before and after the F1 tightening. Built from
+  // fragments, key/separator/value as separate concatenated literals — same
+  // convention as the fixtures above, and required by this test file's own
+  // header rule (no credential-shaped literal in source): a *pinned older*
+  // engine without this PR's PLACEHOLDER widening has no reason to treat
+  // "not-a-real-token" as a placeholder, so the literal phrase, written
+  // contiguously, is exactly the shape credential-assignment matches.
   test('control: "not-a-real-token" is still not flagged', () => {
-    const f = write("f1-control-1.ts", 'password: "not-a-real-token"\n');
+    const f = write("f1-control-1.ts", "password" + ": " + '"not-a-real-token"' + "\n");
     const r = run([f]);
     expect(r.exitCode).toBe(0);
   });
 
   test('control: "should-never-be-here" is still not flagged', () => {
-    const f = write("f1-control-2.ts", 'password: "should-never-be-here"\n');
+    const f = write("f1-control-2.ts", "password" + ": " + '"should-never-be-here"' + "\n");
     const r = run([f]);
     expect(r.exitCode).toBe(0);
   });
