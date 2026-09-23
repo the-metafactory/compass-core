@@ -22,7 +22,7 @@ import { evaluatePinChange, extractEngineRef, extractWorkflowRef } from "../pin-
 
 const OLD_SHA = "a73c053bfb19cdbe06fd3f0c7a35204dfaa81cf2";
 const NEW_SHA = "b1b2b3b4b5b6b7b8b9b0b1b2b3b4b5b6b7b8b9b0";
-const OLDER_SHA = "5de19b25de19b25de19b25de19b25de19b25de1";
+const OLDER_SHA = "5de19b25de19b25de19b25de19b25de19b25de19";
 
 /** A trimmed but realistic slice of compass-governance.yml around both checkout steps. */
 function workflowFixture(engineRef: string): string {
