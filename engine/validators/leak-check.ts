@@ -294,11 +294,15 @@
  * quoted keys — has a closing quote in between, so the rule never fired
  * there at all; this was probably the biggest miss of anything #37/#42
  * fixed. Fixed with a new leading alternative, CRED_KEY_QUOTED, matching a
- * whole `"KEY"` or `'KEY'` pair (see its own comment for why it's two
- * literal alternatives and not a backreference). No other rule needed a
- * quoted-key path: the dedicated shape rules (`jwt`, `sendgrid-api-key`,
- * etc.) never depended on a key name in the first place, and the denylist
- * is a plain substring match regardless of surrounding syntax.
+ * whole quoted key — `"KEY"`/`'KEY'`, or the SAME identifier-prefix-plus-
+ * boundary shapes the unquoted branches use (`"refresh_token"`,
+ * `"OPENAI_API_KEY"`, `"refreshToken"` all match, `"pretoken"`/`"tokenizer"`
+ * still don't — review on #46, B1; see CRED_KEY_QUOTED's own comment for the
+ * two boundary constructions and why they're quantifier-based, not
+ * lookaround). No other rule needed a quoted-key path: the dedicated shape
+ * rules (`jwt`, `sendgrid-api-key`, etc.) never depended on a key name in
+ * the first place, and the denylist is a plain substring match regardless
+ * of surrounding syntax.
  *
  * JSON VALUES NEVER GET THE CODE-EXPRESSION CARVE-OUT, AND THAT IS CORRECT,
  * NOT AN OVERSIGHT (issue #46's last box): the code-expression exemption in
@@ -404,26 +408,47 @@ const CRED_KEY_UPPER_FIRST = `(?:${CRED_KEYS.map((k) => k[0]!.toUpperCase() + ci
  * (`"token": "…"`), so the rule never produced a candidate match there at
  * all. `{"token": "<secret>"}` gave zero findings on main.
  *
- * Fixed as two literal, fully-enumerated alternatives — `"KEY"` and `'KEY'`
- * — rather than a backreference-captured quote character. That choice is
- * deliberate on two counts:
- *   1. It adds no new capturing group, so the value alternation's existing
- *      `m[1]`..`m[4]` indices (used throughout `accept`) stay unshifted.
- *   2. Because there is no `.*` between the quotes, CRED_KEY_ANY must match
- *      the ENTIRE quoted content end-to-end — the same last-segment
- *      discipline the unquoted branches enforce via lookbehind/lookahead
- *      falls out for free here: `"tokenizer"` and `"pretoken"` still don't
- *      match, since neither equals a CRED_KEYS alternative exactly.
+ * First cut (review on #46, B1) required the WHOLE quoted content to equal a
+ * bare `CRED_KEYS` word, so it was narrower than the unquoted branches — it
+ * missed `"refresh_token"`, `"access_token"`, `"OPENAI_API_KEY"`,
+ * `"GITHUB_TOKEN"` (snake_case / CONST_CASE prefix) and `"refreshToken"` /
+ * `"botToken"` (camelCase prefix), all of which the unquoted branches
+ * already caught. Fixed by giving the quoted alternatives the SAME optional
+ * identifier-prefix allowance the unquoted branches already have — reusing
+ * the exact two boundary shapes from CREDENTIAL KEY NAMES MATCH AS THE LAST
+ * SEGMENT OF AN IDENTIFIER (issue #37) rather than inventing a third:
+ *   1. `(?:[A-Za-z0-9_-]*[_-])?${CRED_KEY_ANY}` — an optional prefix of any
+ *      identifier characters, but ONLY when it ends in `_`/`-` right before
+ *      the keyword (mirrors the unquoted `(?<![A-Za-z0-9])` boundary: a
+ *      clean, non-alnum separator immediately before the key). With no
+ *      prefix at all, this reduces to the original bare `"KEY"` case.
+ *   2. `[A-Za-z0-9_-]*[a-z]${CRED_KEY_UPPER_FIRST}` — a prefix that ends in
+ *      a genuine lowercase-to-uppercase transition (mirrors the unquoted
+ *      `(?<=[a-z])` camelCase lookbehind), so `"refreshToken"` and
+ *      `"botToken"` match via `CRED_KEY_UPPER_FIRST`, same as their
+ *      unquoted forms.
+ * Both are quantifier-based prefixes, not lookaround, because a variable-
+ * length prefix can't sit inside a fixed-width lookbehind — that's the
+ * actual reason this needs its own construction rather than literally
+ * reusing the unquoted regex fragments, even though the boundary RULE
+ * itself (what counts as a valid segment start) is identical.
  *
- * Deliberately NOT extended to the CRED_KEY_UPPER_FIRST (camelCase-prefix)
- * shape inside quotes — `"fooSecret"` with an arbitrary prefix before the
- * opening quote is not what this issue asks for, and the compound
- * credential words already in CRED_KEYS (`api[_-]?key`, `client[_-]?secret`,
- * `auth[_-]?token`) already match a quoted camelCase compound like
- * `"authToken"` or `"clientSecret"` on their own, because CRED_KEY_ANY is
- * case-insensitive letter by letter, not just at the first letter.
+ * The keyword must still be the LAST segment before the closing quote —
+ * nothing follows it but the literal quote character — so `"tokenizer"` and
+ * `"pretoken"` (no `_`/`-`/camelCase boundary immediately before "token")
+ * still don't match: an arbitrary letter-run prefix with no boundary is
+ * exactly what this is designed to reject. See the quoted-key tests in
+ * `__tests__/leak-check.test.ts` for both directions.
+ *
+ * Neither alternative adds a capturing group (`(?:…)` throughout), so the
+ * value alternation's existing `m[1]`..`m[4]` indices (read throughout
+ * `accept`) stay unshifted.
  */
-const CRED_KEY_QUOTED = `(?:"${CRED_KEY_ANY}"|'${CRED_KEY_ANY}')`;
+const CRED_KEY_QUOTED_PREFIX = `(?:[A-Za-z0-9_-]*[_-])?${CRED_KEY_ANY}`;
+const CRED_KEY_QUOTED_CAMEL = `[A-Za-z0-9_-]*[a-z]${CRED_KEY_UPPER_FIRST}`;
+const CRED_KEY_QUOTED =
+  `(?:"${CRED_KEY_QUOTED_PREFIX}"|"${CRED_KEY_QUOTED_CAMEL}"` +
+  `|'${CRED_KEY_QUOTED_PREFIX}'|'${CRED_KEY_QUOTED_CAMEL}')`;
 
 /**
  * Built-in ruleset — deliberately small and shape-based. These are the leaks that

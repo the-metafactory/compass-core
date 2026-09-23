@@ -1361,3 +1361,83 @@ describe("leak-check.ts — issue #46: quoted credential keys", () => {
     expect(r.output).toContain("f46-8.json:1: credential-assignment");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review on #46, B1 — the first cut's CRED_KEY_QUOTED required the WHOLE
+// quoted content to equal a bare CRED_KEYS word, which is narrower than the
+// unquoted branches: those accept the keyword as the LAST SEGMENT after a
+// `_`/`-` separator or a camelCase transition (issue #37). Realistic quoted
+// keys with exactly that shape — `"refresh_token"`/`"access_token"` in an
+// OAuth token cache or a gcloud `authorized_user` credential file,
+// `"OPENAI_API_KEY"`/`"GITHUB_TOKEN"` in an MCP or Claude `settings.json`
+// `env` block, `"botToken"` in a bot `config.json` — were missed, quoted,
+// even though their unquoted forms were already caught.
+//
+// Fix: CRED_KEY_QUOTED now allows the same two boundary shapes inside the
+// quotes that the unquoted branches already use (an optional prefix ending
+// in `_`/`-`, or a prefix ending in a lowercase→uppercase camelCase step
+// feeding CRED_KEY_UPPER_FIRST) — see CRED_KEY_QUOTED's own comment in
+// leak-check.ts.
+//
+// "[watched]" tests were confirmed to give 0 findings against this PR's
+// pre-review head (24df365) — see the PR body for the captured output —
+// and are BLOCKED after the fix. N1 pins the negative the reviewer flagged
+// as missing (a bare letter-run prefix with no boundary must not match, the
+// mutation-surviving gap) alongside the existing "tokenizer" guard.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #46 review B1: quoted keys keep the unquoted branches' prefix/boundary allowance", () => {
+  const jsonCases: [string, string][] = [
+    ["f46-b1-1.json", "refresh" + "_" + "token"], // snake_case prefix
+    ["f46-b1-2.json", "access" + "_" + "token"], // snake_case prefix
+    ["f46-b1-3.json", "id" + "_" + "token"], // short snake_case prefix
+    ["f46-b1-4.json", "OPENAI" + "_" + "API" + "_" + "KEY"], // CONST_CASE prefix, compound keyword
+    ["f46-b1-5.json", "GITHUB" + "_" + "TOKEN"], // CONST_CASE prefix
+    ["f46-b1-6.json", "refresh" + "Token"], // camelCase prefix
+    ["f46-b1-7.json", "bot" + "Token"], // short camelCase prefix
+  ];
+
+  for (const [name, key] of jsonCases) {
+    test(`[watched] a quoted key built from fragments around "${key.slice(-5)}" is flagged in .json`, () => {
+      const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+      const f = write(name, content);
+      const r = run([f]);
+      expect(r.exitCode).toBe(1);
+      expect(r.output).toContain(`${name}:1: credential-assignment`);
+      expect(r.output).not.toContain(FAKE.envValue);
+    });
+  }
+
+  test('[watched] the same camelCase-prefixed quoted key is flagged in .ts too', () => {
+    const key = "refresh" + "Token";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue) + "};\n";
+    const f = write("f46-b1-8.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b1-8.ts:1: credential-assignment");
+  });
+
+  test('[N1] a quoted key with an arbitrary letter prefix and no boundary ("pretoken") is not flagged', () => {
+    const key = "pre" + "token";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-n1-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted all-uppercase run with no separator and no camelCase transition ("MYTOKEN") is not flagged', () => {
+    const key = "MY" + "TOKEN";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-n1-2.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted "tokenizer" key (keyword as a PREFIX, not the last segment) is still not flagged', () => {
+    const key = "token" + "izer";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-n1-3.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
