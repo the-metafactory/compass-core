@@ -26,6 +26,60 @@
 # the SHA, read what changed, land it in a PR like any other change. Re-running
 # the installer from a newer compass-core re-renders the pin.
 #
+# A PR CANNOT CHANGE THE WORKFLOW OR THE PIN THAT GATES IT
+# ----------------------------------------------------------
+# (the-metafactory/compass-core#41). This job runs on `pull_request_target`,
+# not `pull_request`: GitHub resolves a pull_request_target-triggered
+# workflow, and every value inside it — including the `ref:` on the
+# compass-core checkout below — from the file as it exists on the BASE
+# branch, never the PR head's own copy. A PR editing its own copy of this
+# file, including repointing the pin to an older, weaker engine, has zero
+# effect on the run that gates it. Two things follow from that, and both are
+# applied below — see GitHub's own hardening guidance for pull_request_target
+# ("Keeping your GitHub Actions and workflows secure: Preventing pull_request_target
+# workflows from accessing secrets and writing to the repository"):
+#
+#   1. This job NEVER checks out `github.event.pull_request.head.sha` (the PR
+#      author's own commits) into the default working directory, and NEVER
+#      executes anything from it. The one step that touches the PR head at
+#      all (leak-check, which has to look at the PR's OWN changed files to
+#      scan them) checks it out to an isolated `pr-head/` directory with
+#      `persist-credentials: false`, and every validator reads paths under
+#      that directory as TEXT — `bun <engine path> pr-head/<file>` — never as
+#      something invoked, sourced, `bun install`'d, or given a hook to run.
+#      Read the file; never run the file.
+#   2. `permissions:` is the minimum this job needs — `contents: read` to
+#      check things out, `issues: read` because label-check lists the repo's
+#      labels. Nothing here writes to the repository, comments on the PR, or
+#      needs any other scope, and pull_request_target's ambient token is
+#      privileged enough that an unused scope left in is a real difference,
+#      not a formality.
+#
+# A CONSEQUENCE WORTH SAYING OUT LOUD: under `pull_request`, a fork PR never
+# saw `secrets.CONFIDENTIALITY_DENYLIST` or a token with any real reach — the
+# leak-check step below used to comment on that ("Secrets are not exposed to
+# fork PRs"). That is no longer true. `pull_request_target` hands this job
+# the SAME secrets and the SAME token for a fork PR as for a same-repo one —
+# that is the whole point of the event (the base branch's code and secrets,
+# regardless of who opened the PR) and also exactly why rule 1 above is not
+# optional: with every PR now getting real secrets, "never run PR code with
+# them" is the entire safety margin.
+#
+# A SEPARATE CHECK REFUSES AN UNLABELLED PIN CHANGE (compass-core#41, ruling
+# item 2). pull_request_target already stops a PR from being gated by its OWN
+# chosen pin — but a maintainer can still merge a PR that changes the pin
+# (deliberately or by reviewing past it), and that pin then governs EVERY
+# subsequent PR. `pin-check`, the second job below, refuses any PR that edits
+# the `ref:` on the compass-core checkout unless it carries the `pin-bump`
+# label — a functional label (not one of this repo's type/priority labels),
+# created once with `gh label create pin-bump ...`. A labelled, pin-changing
+# PR is not auto-merged by anything here: the label signals "this needs a
+# human to read the diff and admin-merge it," same as any other pin bump.
+# pin-check re-implements the small extraction-and-compare in shell rather
+# than calling the pin-check module (validators/pin-check.ts, under engine/)
+# from .compass-engine — see that file's own header for why (a pin cannot
+# point at a commit that doesn't exist on main yet, and the module is new).
+#
 # CONFIDENTIALITY_DENYLIST_FILE — READ THIS BEFORE WIRING THE SECRET
 # -------------------------------------------------------------------
 # The scanner's variable was renamed from CONFIDENTIALITY_DENYLIST, which is
@@ -56,11 +110,6 @@
 #
 # Arm the local hook once per clone:  git config core.hooksPath .githooks
 #
-# Secrets are not exposed to fork PRs, so a fork run is always built-ins-only —
-# see sops/confidentiality-gate.md §5 for the local-gate step a maintainer owes
-# a fork PR before merging. That is also why --require-patterns is applied only
-# when a denylist is actually available: a fork PR must run reduced, not fail.
-#
 # Actions and the engine checkout are pinned by commit SHA, not tag. A tag is
 # mutable; a security gate that a consumer copies should not be re-pointable by
 # whoever can move it.
@@ -68,7 +117,7 @@
 name: compass governance
 
 on:
-  pull_request:
+  pull_request_target:
 
 permissions:
   contents: read
@@ -77,12 +126,31 @@ permissions:
 jobs:
   governance:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
     steps:
-      - name: Check out the repo being gated
+      # Checked out for GIT PLUMBING ONLY — computing the PR's changed-file
+      # list needs both commits' objects in one authenticated clone (private
+      # repos need the token for that fetch; persist-credentials: false on
+      # pr-head below deliberately removes it there). No validator reads a
+      # FILE out of this directory; every validator reads from pr-head/. This
+      # is not "the workflow's own trust anchor" in any special sense —
+      # GitHub already sources the workflow FILE (trigger, pin, every step)
+      # from the base branch via the pull_request_target event itself, not
+      # from this checkout.
+      - name: Check out the base branch (git history only, for the diff below)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Full history: the leak-check step needs the merge-base of the PR.
+          path: base
           fetch-depth: 0
+
+      - name: Check out the PR head as DATA ONLY (never executed)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-head
+          persist-credentials: false
 
       - name: Check out the compass-core engine
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -99,12 +167,18 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: claude-md-check
-        run: bun .compass-engine/engine/validators/claude-md-check.ts CLAUDE.md
+        # Reads the PR's OWN proposed CLAUDE.md and compass.config.yaml — data
+        # under pr-head/, opened and parsed by the pinned engine, never run.
+        run: |
+          bun .compass-engine/engine/validators/claude-md-check.ts pr-head/CLAUDE.md \
+            --config pr-head/compass.config.yaml
 
       - name: label-check
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bun .compass-engine/engine/validators/label-check.ts "${{ github.repository }}"
+        run: |
+          bun .compass-engine/engine/validators/label-check.ts "${{ github.repository }}" \
+            --config pr-head/compass.config.yaml
 
       - name: leak-check (changed files)
         env:
@@ -114,46 +188,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          # --require-patterns only when a denylist is actually reachable. A fork
-          # PR gets no secrets by design and must run reduced, not fail; a
-          # non-fork run that HAS the secret must refuse to run degraded.
+          # --require-patterns only when a denylist is actually reachable.
+          # Every PR gets this job's real secrets now (pull_request_target,
+          # see the file header) — the old "fork PRs run reduced" distinction
+          # no longer applies; this branch only handles the org simply not
+          # having wired the secret up yet.
           REQUIRE=""
           if [ -n "$DENYLIST" ]; then
             printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
             export CONFIDENTIALITY_DENYLIST_FILE="$RUNNER_TEMP/denylist.txt"
             REQUIRE="--require-patterns"
           else
-            echo "::notice::No denylist secret available to this run (fork PR, or the secret is not wired) — built-in rules only."
+            echo "::notice::No denylist secret available to this run — built-in rules only."
           fi
 
-          # Diff from the MERGE-BASE, not the base branch tip. The checkout is the
-          # merge commit, so its files include whatever main has merged in; a
-          # two-dot diff against the base tip lists files only main touched and
-          # fails the PR on somebody else's leak.
-          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          # Both commits' objects have to exist in ONE repo to diff them. base/
+          # is the authenticated checkout (persist-credentials left at its
+          # default so this fetch works on a private repo too); fetching
+          # HEAD_SHA into it — git objects only, nothing here executes
+          # anything from the tree — is enough for `git diff` to find their
+          # merge-base itself via `A...B` diff syntax. pr-head/ is never
+          # fetched into or diffed FROM: it is read from, below, as data.
+          git -C base fetch --no-tags origin "$HEAD_SHA"
 
           # --no-renames + R in the filter, deliberately, and both are load-
           # carrying: without them a rename-plus-edit is reported as a single R
           # entry, ACM drops it, and the renamed file — secret and all — is never
           # scanned. Verified: git mv + append a credential produces an EMPTY
           # ACM listing.
-          git diff --no-renames --name-only --diff-filter=ACMR -z \
-            "$MERGE_BASE" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          git -C base diff --no-renames --name-only --diff-filter=ACMR -z \
+            "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
 
-          # The list names paths as the PR HEAD has them, but the checkout on disk
-          # is the MERGE commit. A file the PR added and the base branch then
-          # deleted is listed and absent — and absent from the merged result too,
-          # so there is nothing to scan and nothing at risk. Drop those, loudly:
-          # leak-check treats a missing path as a usage error, on purpose.
-          # The engine checkout is skipped for the same reason it exists: it is
-          # compass-core's files, not this PR's changes.
+          # Paths are relative to pr-head/, which is exactly where the PR's
+          # own file contents live — no merge commit to reconstruct, no
+          # separate "is it in the merged tree" check: the PR head IS the
+          # tree being scanned.
           : > "$RUNNER_TEMP/scan.txt"
           while IFS= read -r -d '' f; do
             case "$f" in .compass-engine/*) continue ;; esac
-            if [ -f "$f" ]; then
-              printf '%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
+            if [ -f "pr-head/$f" ]; then
+              printf 'pr-head/%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
             else
-              echo "::notice::$f is in the PR diff but not in the merged tree — not scanned."
+              echo "::notice::$f is in the PR diff but not present at the PR head — not scanned."
             fi
           done < "$RUNNER_TEMP/changed.txt"
 
@@ -166,3 +242,85 @@ jobs:
           # intact, and xargs -0 is portable in a way that GNU's -a/-d are not.
           xargs -0 bun .compass-engine/engine/validators/leak-check.ts $REQUIRE \
             < "$RUNNER_TEMP/scan.txt"
+
+  pin-check:
+    # Separate job, separate status check: a PR that fails ONLY pin-check
+    # (governance itself is green — it ran main's workflow and main's pin,
+    # completely unaffected by whatever the PR's own copy says) should read
+    # as exactly that in the PR's checks list, not be folded into governance's
+    # pass/fail.
+    name: pin-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the base branch (this workflow's own trust anchor)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: base
+          persist-credentials: false
+
+      - name: Check out the PR head as DATA ONLY (never executed)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-head
+          persist-credentials: false
+
+      - name: refuse a pin change without the pin-bump label
+        # HAS_PIN_BUMP_LABEL is computed by the `contains()` expression, not
+        # interpolated PR text — the only thing that reaches the shell below
+        # is the literal string "true" or "false". See pin-check.ts's own
+        # header for why this shell reimplements, rather than invokes, that
+        # file's evaluatePinChange (unit-tested there; the pin cannot yet
+        # point at a commit that includes it).
+        env:
+          HAS_PIN_BUMP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'pin-bump') }}
+        run: |
+          set -euo pipefail
+
+          # ref: <40-hex> on the compass-core engine checkout step, anchored
+          # on the "compass-core pin" comment that line always carries — see
+          # the pin-check module's extractWorkflowRef (validators/pin-check.ts,
+          # under engine/), which this mirrors exactly.
+          extract_workflow_ref() {
+            grep -oP '(?<=ref: )[0-9a-f]{40}(?=\s*#.*compass-core pin)' "$1" 2>/dev/null || true
+          }
+          # const ENGINE_REF = "<40-hex>"; in engine/install.ts — mirrors
+          # extractEngineRef. Absent in a consumer repo (no install.ts there),
+          # which is fine: the loop below only compares it when the file
+          # exists on at least one side.
+          extract_engine_ref() {
+            grep -oP '(?<=^const ENGINE_REF = ")[0-9a-f]{40}(?=";$)' "$1" 2>/dev/null || true
+          }
+
+          WORKFLOW_PATH=".github/workflows/compass-governance.yml"
+          BASE_WORKFLOW_REF=$(extract_workflow_ref "base/$WORKFLOW_PATH")
+          HEAD_WORKFLOW_REF=$(extract_workflow_ref "pr-head/$WORKFLOW_PATH")
+
+          CHANGED=0
+          if [ "$BASE_WORKFLOW_REF" != "$HEAD_WORKFLOW_REF" ]; then
+            echo "::notice::$WORKFLOW_PATH engine pin: ${BASE_WORKFLOW_REF:-<absent>} -> ${HEAD_WORKFLOW_REF:-<absent>}"
+            CHANGED=1
+          fi
+
+          INSTALL_PATH="engine/install.ts"
+          if [ -f "base/$INSTALL_PATH" ] || [ -f "pr-head/$INSTALL_PATH" ]; then
+            BASE_ENGINE_REF=$([ -f "base/$INSTALL_PATH" ] && extract_engine_ref "base/$INSTALL_PATH" || true)
+            HEAD_ENGINE_REF=$([ -f "pr-head/$INSTALL_PATH" ] && extract_engine_ref "pr-head/$INSTALL_PATH" || true)
+            if [ "$BASE_ENGINE_REF" != "$HEAD_ENGINE_REF" ]; then
+              echo "::notice::$INSTALL_PATH ENGINE_REF: ${BASE_ENGINE_REF:-<absent>} -> ${HEAD_ENGINE_REF:-<absent>}"
+              CHANGED=1
+            fi
+          fi
+
+          if [ "$CHANGED" = "1" ] && [ "$HAS_PIN_BUMP_LABEL" != "true" ]; then
+            echo "::error::This PR changes the governance engine pin without the 'pin-bump' label. Pin changes are admin-merged after review — add the label if this is a deliberate bump."
+            exit 1
+          fi
+
+          if [ "$CHANGED" = "1" ]; then
+            echo "Pin change detected and labelled pin-bump — OK, admin review required before merge."
+          else
+            echo "No pin change in this PR."
+          fi
