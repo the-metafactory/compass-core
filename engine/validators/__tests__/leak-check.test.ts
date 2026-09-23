@@ -25,6 +25,26 @@ const FAKE = {
   anthropicKey: "sk-" + "ant-" + "api03-" + "QqWwEeRrTtYyUuIiOoPp",
   privateKeyHeader: "-----BEGIN " + "RSA PRIVATE KEY-----",
   credential: "Tr0ub4dor-and-three",
+  // issue #31 review on #35 (F1) — dedicated shape-rule fixtures, all built
+  // from fragments so no provider-shaped literal is contiguous in source.
+  jwtHeader: "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+  jwtPayload: "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ",
+  jwtSig: "MEQCIG" + "oodSigForTestingOnly1234567890",
+  sendgridKey: "SG" + "." + "aBcDeFgHiJkLmNoPqRsT12" + "." + "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789ABCDefgh",
+  discordToken: "MTEx" + "MjIzMzQ0NTU2Njc3ODg5" + "." + "GaBcDe" + "." + "AbCdEfGhIjKlMnOpQrStUvWxYzAb1234",
+  googleOAuth: "ya29" + "." + "a0AbCdEfGhIjKlMnOpQrStUvWxYz1234567890",
+  // A base64-ish blob with a dot inserted — the exact adversarial shape from
+  // the review (two long uppercase-heavy runs, each over the 40-char
+  // identifier-length cap, joined by "."), not a real base64 encoding.
+  base64WithDot: "QUJD".repeat(11) + "." + "TU5P".repeat(11),
+  // "Word2024.Word" — a dotted password with no camelCase/underscore
+  // structure, the row credential-assignment's old carve-out let through.
+  dottedPassword: "Fake" + "2024" + "." + "Example",
+  // A call-shaped value whose argument is NOT a plausible identifier
+  // (hyphens aren't in the identifier charset at all).
+  callShapedSecret: "fake(" + "9f8e7d6c-5b4a-3210-9d3e-9d3e9d3e9d3e" + ")",
+  // A JS template-literal-shaped value: backtick-quoted, 24+ chars inside.
+  templateLiteral: "Qx7f".repeat(6),
 };
 
 let tmp: string;
@@ -417,8 +437,13 @@ describe("leak-check.ts — issue #31: code-expression values are not credential
 
   test("a dotted value that is NOT a clean identifier chain (trailing garbage) is still flagged", () => {
     // Guards against the code-expression carve-out being so loose it eats a
-    // real secret that merely happens to contain a dot.
-    const f = write("dotty.ts", "secret: not.actually.code!!!garbage\n"); // leak-check:allow credential-assignment — synthetic fixture proving the rule still fires on a dotted value that is NOT a clean code-expression chain; not a real secret
+    // real secret that merely happens to contain a dot. Built from fragments
+    // (review on #35, F5) — resolution (a), per this file's own header note,
+    // rather than a leak-check:allow marker on a fixture that could just as
+    // well not need one.
+    const key = "secret";
+    const value = "not" + ".actually" + ".code!!!garbage";
+    const f = write("dotty.ts", `${key}: ${value}\n`);
     const r = run([f]);
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain("dotty.ts:1: credential-assignment");
@@ -544,5 +569,272 @@ describe("leak-check.ts — issue #31: leak-check:allow exemption marker", () =>
     const r = run([f]);
     expect(r.exitCode).toBe(0);
     expect(r.output).toContain("1 exemption(s) honoured");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #35 review (compass-core#31) — F1: the member-expression carve-out let
+// dotted/call-shaped real-secret shapes through, and provider-token shapes
+// with no key-name (`token:`/`secret:`) at all had no rule of their own.
+//
+// Each "[watched]" test here was confirmed to PASS EVERY RULE (a real
+// weakening) on this branch's pre-review head (b1cfbea) and is BLOCKED
+// after. See the PR body for the reviewer's before/after table.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — F1: dedicated provider-token shape rules (fire regardless of key name)", () => {
+  test("[watched] a JWT, unquoted, in YAML — no key at all needed to fire", () => {
+    const jwt = `${FAKE.jwtHeader}.${FAKE.jwtPayload}.${FAKE.jwtSig}`;
+    const f = write("jwt.yml", `token: ${jwt}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("jwt.yml:1: jwt");
+  });
+
+  test("[watched] a JWT, unquoted, in .env", () => {
+    const jwt = `${FAKE.jwtHeader}.${FAKE.jwtPayload}.${FAKE.jwtSig}`;
+    const f = write("jwt.env", `AUTH_TOKEN=${jwt}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("jwt.env:1: jwt");
+  });
+
+  test("a quoted JWT still blocks too (never depended on the carve-out)", () => {
+    const jwt = `${FAKE.jwtHeader}.${FAKE.jwtPayload}.${FAKE.jwtSig}`;
+    const f = write("jwt-quoted.yml", `token: "${jwt}"\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("jwt-quoted.yml:1: jwt");
+  });
+
+  test("[watched] a SendGrid-shaped key, unquoted, fires regardless of key name", () => {
+    const f = write("sendgrid.ts", `api_key: ${FAKE.sendgridKey}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("sendgrid.ts:1: sendgrid-api-key");
+  });
+
+  test("[watched] a Discord-bot-token-shaped value, unquoted", () => {
+    const f = write("discord.ts", `token: ${FAKE.discordToken}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("discord.ts:1: discord-bot-token");
+  });
+
+  test("[watched] a Google-OAuth-shaped (ya29.) value, unquoted", () => {
+    const f = write("google.ts", `token: ${FAKE.googleOAuth}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("google.ts:1: google-oauth-token");
+  });
+
+  test("none of the dedicated shape rules can be marked away (leak-check-allow-unsupported)", () => {
+    const jwt = `${FAKE.jwtHeader}.${FAKE.jwtPayload}.${FAKE.jwtSig}`;
+    const f = write(
+      "jwt-marked.ts",
+      `token: ${jwt} // leak-check:allow jwt — this is fine, trust me\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("jwt-marked.ts:1: jwt");
+    expect(r.output.toLowerCase()).toContain("not exemptable");
+  });
+});
+
+describe("leak-check.ts — F1: credential-assignment's carve-out is narrowed (file type + shape + plausibility)", () => {
+  test("[watched] a base64-with-dots blob (segments over the 40-char identifier cap) still blocks", () => {
+    const f = write("b64dots.ts", `secret: ${FAKE.base64WithDot}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("b64dots.ts:1: credential-assignment");
+  });
+
+  test("[watched] a dotted password with no camelCase/underscore structure still blocks, in .ts", () => {
+    const f = write("fakepw.ts", `password: ${FAKE.dottedPassword}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("fakepw.ts:1: credential-assignment");
+  });
+
+  test("[watched] the same dotted password still blocks in .yml (never a code file)", () => {
+    const f = write("fakepw.yml", `password: ${FAKE.dottedPassword}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("fakepw.yml:1: credential-assignment");
+  });
+
+  test("[watched] a call-shaped value whose argument isn't a plausible identifier still blocks", () => {
+    const f = write("fakecall.ts", `password: ${FAKE.callShapedSecret}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("fakecall.ts:1: credential-assignment");
+  });
+
+  test("a plain identifier value in .yml (no dot, no call) still blocks — never a code file", () => {
+    const bare = "Qx7f".repeat(10); // 40 chars, clean charset, no dot/call
+    const f = write("bare.yml", `token: ${bare}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("bare.yml:1: credential-assignment");
+  });
+
+  test("a member-expression value in .json still blocks — never a code file (no inline-code exception there)", () => {
+    // Unquoted key:value, same shape credential-assignment matches anywhere
+    // — a quoted JSON key (`"token":`) doesn't match the rule's keyword
+    // pattern at all (the closing quote sits between the keyword and the
+    // separator), so this uses the shape the rule actually looks for.
+    const f = write("member.json", "token" + ": " + "zeroReports.token" + "\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("member.json:1: credential-assignment");
+  });
+
+  // The three original false positives this issue exists to fix — must
+  // still pass in .ts after the narrowing.
+  test("[watched] token: ZERO_REPORTS().token still passes in .ts", () => {
+    const f = write("zero-reports.ts", "const cfg = {\n  token: ZERO_REPORTS().token,\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("[watched] token: zeroReports.token still passes in .ts", () => {
+    const f = write("member.ts", "const cfg = {\n  token: zeroReports.token,\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("[watched] token: computeTally(x) still passes in .ts", () => {
+    const f = write("call.ts", "const cfg = {\n  token: computeTally(x),\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("[watched] a member expression inside markdown inline code still passes", () => {
+    const f = write(
+      "doc.md",
+      "- leak-check `credential-assignment` on `token: someObject.token` — (b) detector corrected\n",
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("the SAME member expression, NOT inside inline code, blocks in markdown", () => {
+    // Confirms the markdown exception is really "inside a closed inline-code
+    // span", not "markdown gets the carve-out too".
+    const f = write("doc2.md", "leak-check credential-assignment on token: someObject.token plain text\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("doc2.md:1: credential-assignment");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #35 review — F2: the backtick fix from the #33 round was itself unsafe —
+// it hid a backtick-quoted template literal entirely, and truncated a value
+// with an INTERIOR backtick down to whatever came before it.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — F2: backtick-quoted values, and interior vs. closing backticks", () => {
+  test("[watched] token: `<24+ chars>` (a JS template literal) still blocks", () => {
+    const f = write("tpl.ts", `token: \`${FAKE.templateLiteral}\`\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("tpl.ts:1: credential-assignment");
+    // Never code-exempt, even though the .ts carve-out would otherwise apply.
+  });
+
+  test("[watched] a value with an interior backtick (not closing anything) still blocks", () => {
+    const content = "token" + ": abc" + "`" + FAKE.templateLiteral + "\n";
+    const f = write("tpl-interior.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("tpl-interior.ts:1: credential-assignment");
+  });
+
+  test("a backtick-quoted placeholder is still recognised as a placeholder (not flagged)", () => {
+    const f = write("tpl-placeholder.ts", "token: `changeme`\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #35 review — F3: an honoured exemption echoed its reason unscrubbed,
+// which made the marker itself a disclosure channel. Fix: scan the reason
+// with every rule before honouring; withhold it (never print it) if it
+// contains a finding; scrub ids/emails from a reason that IS printed.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — F3: a reason that itself contains a finding is never honoured or printed", () => {
+  test("[watched] reviewer case 1 — reason contains a secret-shaped fragment: withheld, still blocks", () => {
+    const bare = "Qx7f".repeat(10);
+    const f = write(
+      "f3-case1.ts",
+      `token: ${bare} // leak-check:allow credential-assignment — contains ${FAKE.awsKeyId} accidentally\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f3-case1.ts:1: credential-assignment");
+    expect(r.output).toContain("reason withheld: contains a finding");
+    expect(r.output).not.toContain(FAKE.awsKeyId);
+    expect(r.output).not.toContain(bare);
+  });
+
+  test("[watched] reviewer case 2 — marker BEFORE the credential (it ends up inside the reason): not suppressed", () => {
+    const bare = "Qx7f".repeat(10);
+    const f = write("f3-case2.ts", `// leak-check:allow credential-assignment — note token: ${bare}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f3-case2.ts:1: credential-assignment");
+    expect(r.output).toContain("reason withheld: contains a finding");
+    expect(r.output).not.toContain(bare);
+  });
+
+  test("[watched] reviewer case 3 — an operator-denylisted term in the reason: withheld, term never printed", () => {
+    const patterns = write("denylist.txt", "AcmeVoltaic\n");
+    const bare = "Qx7f".repeat(10);
+    const f = write(
+      "f3-case3.ts",
+      `secret: ${bare} // leak-check:allow credential-assignment — mentions AcmeVoltaic internally\n`,
+    );
+    const r = run([f, "--patterns", patterns]);
+    expect(r.exitCode).toBe(1);
+    // Still blocks on the denylist hit regardless (unrelated rule, untouched
+    // by a marker naming credential-assignment)...
+    expect(r.output).toContain("f3-case3.ts:1: denylist[1]");
+    // ...and the credential-assignment exemption is ALSO refused, so the
+    // term never reaches the [EXEMPT] line either.
+    expect(r.output).toContain("f3-case3.ts:1: credential-assignment");
+    expect(r.output).toContain("reason withheld: contains a finding");
+    expect(r.output).not.toContain("AcmeVoltaic");
+  });
+
+  test("a reason with no finding in it is honoured and printed normally (regression guard)", () => {
+    const f = write(
+      "f3-clean.ts",
+      `secret: my${FAKE.credential} // leak-check:allow credential-assignment — synthetic fixture value, used only in this test\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+    expect(r.output).toContain("1 exemption(s) honoured");
+    expect(r.output).toContain("synthetic fixture value");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #35 review — F6: a marker with trailing text but no `—`/`--` separator
+// suppressed nothing and warned nothing, leaving the author no hint why.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — F6: a marker with no separator warns", () => {
+  test("[watched] leak-check:allow <rule> <reason, no dash> blocks AND warns", () => {
+    const f = write(
+      "no-sep.ts",
+      `secret: my${FAKE.credential} // leak-check:allow credential-assignment this explains nothing\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("no-sep.ts:1: credential-assignment");
+    expect(r.output.toLowerCase()).toContain("separator");
   });
 });

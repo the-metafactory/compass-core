@@ -54,23 +54,76 @@
  * scanned; only the recursive walk declines. Same for binary files (NUL in the
  * first 8 KB) and files over the size cap: skipped, counted, never silent.
  *
- * CODE EXPRESSIONS ARE NOT CREDENTIALS (issue #31): `credential-assignment`
- * used to flag any `token:`/`secret:`/`password:` followed by 8+ unquoted
- * characters, including a code expression that merely happens to be long
- * enough — `token: ZERO_REPORTS().token` (a call), `token: zeroReports.token`
- * (a member access), `token: computeTally(x)` (a call with an argument).
- * "token" was a domain word there, not a secret, and rewording the code to
- * dodge the detector was the wrong fix (see the companion SOP issue #30 and
- * the factory PR #280 review this issue references).
+ * CODE EXPRESSIONS ARE NOT CREDENTIALS (issue #31, tightened after review on
+ * #35): `credential-assignment` used to flag any `token:`/`secret:`/`password:`
+ * followed by 8+ unquoted characters, including a code expression that merely
+ * happens to be long enough — `token: ZERO_REPORTS().token` (a call), `token:
+ * zeroReports.token` (a member access), `token: computeTally(x)` (a call with
+ * an argument). "token" was a domain word there, not a secret, and rewording
+ * the code to dodge the detector was the wrong fix (see the companion SOP
+ * issue #30 and the factory PR #280 review this issue references).
  *
- * The rule now excludes UNQUOTED values that are provably code: a member or
- * call expression (`a.b`, `f(x)`, `a.b.getToken().value`), an object/array
- * literal, or a spread (`{...}`, `[...]`, `...x`) — see
- * `looksLikeCodeExpression()`. This applies only to the unquoted branch of the
- * match. A QUOTED value is a string literal by construction and is never
- * exempted this way: `token: "ghp_…"` and a bare unquoted 40-char token both
- * still block, because quoting a real credential must never launder it past
- * this check.
+ * The first cut of this fix excluded any unquoted dotted/call-shaped value in
+ * ANY file, which a review on #35 showed let real dotted-and-call-shaped
+ * secrets straight through — a dotted password shaped like a capitalised
+ * word plus a year followed by another capitalised word, a call-shaped
+ * password whose argument was just a random-looking string, base64 blobs
+ * with a stray dot inserted. The carve-out is now narrowed on three axes,
+ * ALL of which must hold:
+ *   1. File type — only `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`, or markdown
+ *      where the value sits inside an inline-code span (the backtick handling
+ *      below is what recognises that; a plain, un-fenced value in `.md`,
+ *      `.yml`, `.env`, or `.json` is never a JS expression and is never
+ *      exempt).
+ *   2. Shape — a dot-separated chain of plain members and/or calls with a
+ *      plausible argument list: `a`, `a.b`, `a.b()`, `a.b(x).c`. A bare word
+ *      with no dot and no call is NOT exempt (see looksLikeChainExpression) —
+ *      a long bare word is exactly what a real secret looks like.
+ *   3. Plausibility — every identifier-looking segment (a call's name, a call's
+ *      simple arguments, a member step) must read as a NAME, not a VALUE
+ *      wearing a name's charset: `^[A-Za-z_$][A-Za-z0-9_$]{0,39}$`, so no
+ *      segment over 40 characters (an HS256 JWT signature is 43), AND —
+ *      because digits alone don't prove anything (`Item2024` is a normal
+ *      identifier) — a segment that mixes letters and digits is disqualified
+ *      unless it has camelCase's internal lower→upper transition or
+ *      CONST_CASE/snake_case's underscore. `zeroReports`, `ZERO_REPORTS`,
+ *      `computeTally`, `x` all pass. `Fake2024` does not — see
+ *      isPlausibleIdentifier.
+ * See looksLikeCodeExpression / looksLikeChainExpression / isPlausibleIdentifier.
+ *
+ * A QUOTED value (`"…"`, `'…'`, or a backtick-quoted value — see BACKTICK
+ * HANDLING below) is a string literal by construction and is NEVER exempted
+ * this way: `token: "ghp_…"` and a bare unquoted 40-char token both still
+ * block, because quoting a real credential must never launder it past this
+ * check.
+ *
+ * DEDICATED SHAPE RULES (review on #35, F1): the carve-out above is a
+ * backstop, not the primary defence for known provider-token shapes — those
+ * get their own rule so they never depend on a key name (`token:`/`secret:`)
+ * being present at all, and are non-exemptable (see NON-EXEMPTABLE RULES):
+ * `jwt`, `sendgrid-api-key`, `google-oauth-token`, `discord-bot-token`. A JWT
+ * unquoted in YAML or `.env` — the most likely real leak this scanner will
+ * ever see — no longer depends on credential-assignment's carve-out at all.
+ *
+ * BACKTICK HANDLING (issue #31 review on #33 found the first bug here; a
+ * second review on #35 found the fix was itself unsafe — F2):
+ *   - A value that STARTS with a backtick is a backtick-quoted literal (a JS
+ *     template literal, or markdown code notation placed directly after the
+ *     key) — a fourth quoted branch alongside `"…"`/`'…'`, never code-exempt,
+ *     same as the other two: `token: \`<24 chars>\`` still blocks.
+ *   - Inside the UNQUOTED branch, a backtick is consumed as an ordinary value
+ *     character UNLESS it is immediately followed by whitespace, one of
+ *     `"'#,;`, or end-of-line — i.e. unless it is actually closing something.
+ *     A value with an INTERIOR backtick and no space after it (nothing
+ *     closes there) still captures the whole thing and still blocks.
+ *     `` `token: someObject.token` `` — a
+ *     markdown line wrapping the WHOLE key:value phrase in inline code, where
+ *     the opening backtick sits before the key, not the value — captures
+ *     `someObject.token` cleanly (the closing backtick is a real boundary
+ *     here: whitespace/EOL follows it) and is what the "markdown inline code"
+ *     exception in axis 1 above actually recognises: the code-expression
+ *     carve-out applies to a markdown value if and only if it was immediately
+ *     followed by a closing backtick.
  *
  * SANCTIONED FALSE-POSITIVE ESCAPE — `leak-check:allow` (issue #31): mirrors
  * `gate:allow` in sops/confidentiality-gate.md §4a, on purpose, because it is
@@ -84,9 +137,21 @@
  *     finding sharing that line is untouched — the marker cannot become a
  *     blanket skip by naming one rule and hiding another.
  *   - A reason is mandatory and must contain a letter or digit — a bare
- *     marker, or one with a punctuation-only "reason" (`— ---`), suppresses
- *     nothing; the finding still blocks and a warning explains why
+ *     marker, one with a punctuation-only "reason" (`— ---`), or one with
+ *     trailing text but no `—`/`--` separator at all, suppresses nothing; the
+ *     finding still blocks and a warning explains why
  *     (`leak-check-allow-unjustified`).
+ *   - The reason itself is scanned with every rule — built-in and operator —
+ *     before the exemption is honoured (review on #35, F3). If the reason
+ *     contains a finding, the marker is invalid: the finding still blocks,
+ *     and the reason is NOT printed — only `reason withheld: contains a
+ *     finding`. This is what stops a marker placed BEFORE a credential from
+ *     suppressing it (the credential ends up inside the reason) and stops an
+ *     honoured exemption from printing a denylisted term that happens to
+ *     appear in its own reason.
+ *   - An honoured reason is printed scrubbed of emails and long numeric id
+ *     sequences (§4a: "Reasons are scrubbed of ids, emails, and codes before
+ *     display") — see scrubReason.
  *   - Any comment syntax works (`//`, `#`, `<!-- -->`, …) — the marker is
  *     matched anywhere on the line, not tied to a language's comment grammar.
  *   - The separator is the em dash `—` (as in the SOP) or `--` as a plain-
@@ -96,16 +161,24 @@
  *     `N exemption(s) honoured` summary.
  *
  *   NON-EXEMPTABLE RULES (mirrors §4a's "not exemptable at any severity"
- *   carve-out for denylist/internal-email/compliance-code): `private-key-header`
- *   and every operator pattern (`denylist[N]`) cannot be marked away. A PEM
+ *   carve-out for denylist/internal-email/compliance-code, widened after
+ *   review on #35, F7): `private-key-header`, every operator pattern
+ *   (`denylist[N]`), and every provider-token shape rule with no ambiguous,
+ *   legitimately-public example (`github-token`, `anthropic-api-key`,
+ *   `slack-token`, `jwt`, `sendgrid-api-key`, `google-oauth-token`,
+ *   `discord-bot-token`) cannot be marked away. `aws-access-key-id` stays
+ *   exemptable — AWS documents an intentionally-public example access-key id
+ *   (the well-known one ending in "EXAMPLE" in their own docs) that
+ *   legitimately appears in docs, and that is the one case §4a's "a reason
+ *   is arguable" test can actually pass. A PEM
  *   private-key header is never a false positive — if it's present, it's a
  *   real key, and the fix is removing it, not annotating it. An operator
  *   pattern is this repo's own denylist tier; the SOP is explicit that
  *   denylist findings resolve only via a carve-out in the private source,
  *   never an inline annotation, and a local marker capable of suppressing an
  *   organisation's confidential term would be exactly the security hole that
- *   rule exists to prevent. Naming either still blocks the finding and prints
- *   `leak-check-allow-unsupported`.
+ *   rule exists to prevent. Naming any of these still blocks the finding and
+ *   prints `leak-check-allow-unsupported`.
  *
  * Exit codes: 0 = clean, 1 = findings, 2 = usage/configuration error.
  */
@@ -127,11 +200,19 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", "ve
 /** Files above this size are skipped with a visible notice (never silently). */
 const MAX_BYTES = 5 * 1024 * 1024;
 
+/** What an `accept` callback needs beyond the regex match itself. */
+interface AcceptContext {
+  /** The full line the match came from — needed to look at what follows the match (backtick handling). */
+  line: string;
+  /** The scanned file's display path, or a synthetic non-file name when checking a `leak-check:allow` reason. */
+  display: string;
+}
+
 interface Rule {
   name: string;
   re: RegExp;
-  /** Optional second-stage check; receives the match. Return false to drop it. */
-  accept?: (m: RegExpExecArray) => boolean;
+  /** Optional second-stage check; receives the match and its context. Return false to drop it. */
+  accept?: (m: RegExpExecArray, ctx: AcceptContext) => boolean;
   /**
    * Defaults to true. false means `leak-check:allow <rule> — <reason>` can
    * never suppress a finding for this rule — see the NON-EXEMPTABLE RULES
@@ -139,6 +220,13 @@ interface Rule {
    */
   exemptable?: boolean;
 }
+
+/**
+ * A backtick is an ordinary value character UNLESS it's immediately followed
+ * by whitespace, a stop character, or end-of-line — i.e. unless it's actually
+ * closing something. See BACKTICK HANDLING in the file header.
+ */
+const UNQUOTED_CHAR = '(?:[^\\s"\'#,;`]|`(?=[^\\s"\'#,;]))';
 
 /**
  * Built-in ruleset — deliberately small and shape-based. These are the leaks that
@@ -155,40 +243,80 @@ const RULES: Rule[] = [
   {
     name: "anthropic-api-key",
     re: /sk-ant-[A-Za-z0-9_-]{16,}/,
+    exemptable: false,
   },
   {
     name: "github-token",
     re: /\b(?:gh[pousr]_[A-Za-z0-9]{28,}|github_pat_[A-Za-z0-9_]{20,})\b/,
+    exemptable: false,
   },
   {
     name: "aws-access-key-id",
     re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b/,
+    // Stays exemptable — see the NON-EXEMPTABLE RULES note above (the AWS
+    // documented example key is the one legitimately-public case).
   },
   {
     name: "slack-token",
     re: /\bxox[abprs]-[A-Za-z0-9-]{10,}/,
+    exemptable: false,
+  },
+  {
+    name: "jwt",
+    // Header and payload are both base64url-encoded JSON objects, which is
+    // why a real JWT (almost) always has both start `eyJ` (base64url of
+    // `{"`). Fires regardless of key name — a JWT never depends on
+    // credential-assignment's carve-out (review on #35, F1).
+    re: /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{10,}\b/,
+    exemptable: false,
+  },
+  {
+    name: "sendgrid-api-key",
+    re: /\bSG\.[A-Za-z0-9_-]{20,24}\.[A-Za-z0-9_-]{38,48}\b/,
+    exemptable: false,
+  },
+  {
+    name: "google-oauth-token",
+    re: /\bya29\.[A-Za-z0-9_-]{20,}\b/,
+    exemptable: false,
+  },
+  {
+    name: "discord-bot-token",
+    re: /\b[A-Za-z0-9_-]{23,26}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,40}\b/,
+    exemptable: false,
   },
   {
     name: "credential-assignment",
-    // key = value / key: value, where key names a credential and value is not a
-    // placeholder, an environment/CI expression, or (unquoted only — see
-    // looksLikeCodeExpression) a code expression.
-    // The unquoted branch's stop-set includes a backtick: markdown wraps code
-    // in `single backticks`, and without this a value like `token:
-    // someObject.token` (inline-code, no space before the closing backtick)
-    // captured the backtick itself as part of the value. That trailing
-    // backtick broke looksLikeCodeExpression's end-anchored match — the
-    // exact false positive this rule exists to fix, now tripping on this
-    // file's own header prose (compass-core#31, review on #33).
-    re: /\b(?:pass(?:word|wd)|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)\b\s*[:=]\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s"'#,;`]+))/i,
-    accept: (m) => {
-      // A quoted value is a string literal by construction: quoting must
-      // never launder a real credential past this check, so the code-
-      // expression carve-out below applies ONLY to the unquoted branch.
+    // key = value / key: value, where key names a credential and value is
+    // not a placeholder, an environment/CI expression, a quoted string
+    // literal (including backtick-quoted), or — narrowly, see the file
+    // header — a code expression.
+    re: new RegExp(
+      '\\b(?:pass(?:word|wd)|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)\\b\\s*[:=]\\s*' +
+        `(?:"([^"\\n]*)"|'([^'\\n]*)'|\`([^\`\\n]*)\`|(${UNQUOTED_CHAR}+))`,
+      "i",
+    ),
+    accept: (m, ctx) => {
+      // A backtick-quoted value is a literal by construction — never
+      // code-exempt, same as "…"/'…'. See BACKTICK HANDLING.
+      const backtickQuoted = m[3];
+      if (backtickQuoted !== undefined) return !isPlaceholder(backtickQuoted);
       const quoted = m[1] ?? m[2];
       if (quoted !== undefined) return !isPlaceholder(quoted);
-      const raw = m[3] ?? "";
+
+      const raw = m[4] ?? "";
       if (isPlaceholder(raw)) return false;
+
+      const matchEnd = m.index + m[0].length;
+      const closesInlineCode = ctx.line[matchEnd] === "`";
+      const isCodeFile = /\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(ctx.display);
+      const isMarkdown = /\.md$/i.test(ctx.display);
+
+      // The code-expression carve-out applies in JS/TS source, and in
+      // markdown ONLY when the value sits inside an inline-code span — see
+      // the file header's CODE EXPRESSIONS / BACKTICK HANDLING notes.
+      if (!isCodeFile && !(isMarkdown && closesInlineCode)) return true;
+
       return !looksLikeCodeExpression(raw);
     },
   },
@@ -218,14 +346,79 @@ function isPlaceholder(value: string): boolean {
   return false;
 }
 
+/** Longest a single identifier-looking segment may be — see isPlausibleIdentifier. */
+const MAX_IDENT_LEN = 40;
+const IDENT_RE = new RegExp(`^[A-Za-z_$][A-Za-z0-9_$]{0,${MAX_IDENT_LEN - 1}}$`);
+
+/**
+ * A segment that reads as a NAME, not a VALUE wearing a name's charset — see
+ * the file header's "Plausibility" axis. Two independent tests:
+ *   1. Charset + length: `^[A-Za-z_$][A-Za-z0-9_$]{0,39}$` — an HS256 JWT
+ *      signature (43 chars) already fails this alone.
+ *   2. Case/underscore structure: a segment that MIXES letters and digits is
+ *      disqualified unless it has camelCase's internal lower→upper
+ *      transition (`zeroReports2`) or CONST_CASE/snake_case's underscore
+ *      (`ZERO_2`, `value_1`). A capitalised-word-plus-digits value has
+ *      neither and reads as a password, not a name — this is what actually
+ *      closes a dotted, capitalised-word-shaped password value (review on
+ *      #35, F1). Pure letters or pure digits are unaffected.
+ */
+function isPlausibleIdentifier(segment: string): boolean {
+  if (!IDENT_RE.test(segment)) return false;
+  const hasDigit = /[0-9]/.test(segment);
+  const hasLetter = /[A-Za-z]/.test(segment);
+  const hasUnderscore = /_/.test(segment);
+  const hasCamelTransition = /[a-z][A-Z]/.test(segment);
+  if (hasDigit && hasLetter && !hasUnderscore && !hasCamelTransition) return false;
+  return true;
+}
+
+/** A call's argument list is plausible when every argument is a plausible identifier or a bare number. */
+function isPlausibleArgList(args: string): boolean {
+  const trimmed = args.trim();
+  if (trimmed.length === 0) return true;
+  return trimmed.split(",").every((arg) => {
+    const a = arg.trim();
+    if (a.length === 0) return false;
+    if (/^-?\d+(?:\.\d+)?$/.test(a)) return true; // a numeric literal argument
+    return isPlausibleIdentifier(a);
+  });
+}
+
+/**
+ * A dot-separated chain of plausible-identifier "steps", each a plain member
+ * (`b`) or a call (`b(...)` with a plausible argument list) — `a.b`, `a.b()`,
+ * `a.b(x).c`, or a bare call with no dot at all (`f(x)`). Requires at least
+ * one dot or one call: a bare word with neither is NOT "provably code" —
+ * isPlaceholder's length floor already handles short values, and a long bare
+ * word is exactly what a real secret looks like (see the "trailing garbage"
+ * guard test).
+ */
+function looksLikeChainExpression(value: string): boolean {
+  const steps = value.split(".");
+  let sawStructure = false;
+  for (const step of steps) {
+    const call = /^([A-Za-z_$][A-Za-z0-9_$]{0,39})\(([^()]*)\)$/.exec(step);
+    if (call) {
+      if (!isPlausibleIdentifier(call[1]!) || !isPlausibleArgList(call[2]!)) return false;
+      sawStructure = true;
+      continue;
+    }
+    if (!isPlausibleIdentifier(step)) return false;
+  }
+  if (steps.length > 1) sawStructure = true;
+  return sawStructure;
+}
+
 /**
  * A value is "provably code, not a literal" when it has JS/TS syntax that no
  * hand-typed credential would ever have: a member-expression or call chain
  * (`a.b`, `f(x)`, `a.b.getToken().value`), an object/array literal, or a
  * spread. See the CODE EXPRESSIONS ARE NOT CREDENTIALS note in the file
- * header for why, and for the (deliberate) limit that this applies only to
- * UNQUOTED values — `credential-assignment`'s `accept` callback is what
- * enforces that limit, not this function.
+ * header for the full contract (file type + shape + plausibility), and for
+ * the (deliberate) limit that this applies only to UNQUOTED values —
+ * `credential-assignment`'s `accept` callback is what enforces that limit,
+ * not this function.
  *
  * The object/array/spread branches below are redundant with `isPlaceholder`'s
  * leading-bracket check today (both reject a value starting with `{`/`[`) —
@@ -239,14 +432,7 @@ function looksLikeCodeExpression(value: string): boolean {
   if (v.startsWith("...")) return true; // spread: ...base
   if (/^\{[\s\S]*\}$/.test(v)) return true; // object literal: {a, b}
   if (/^\[[\s\S]*\]$/.test(v)) return true; // array literal: [a, b]
-
-  const ident = "[A-Za-z_$][\\w$]*";
-  const chain = `${ident}(?:\\.${ident})*`; // a, a.b, a.b.c
-  // A call expression, optionally chained further: f(x), a.b.f(x).c, f().g
-  const call = new RegExp(`^${chain}\\([^()]*\\)(?:\\.${ident}(?:\\([^()]*\\))?)*$`);
-  // A member expression with no call at all: a.b, a.b.c
-  const member = new RegExp(`^${chain}(?:\\.${ident})+$`);
-  return call.test(v) || member.test(v);
+  return looksLikeChainExpression(v);
 }
 
 /**
@@ -254,7 +440,8 @@ function looksLikeCodeExpression(value: string): boolean {
  * (sops/confidentiality-gate.md §4a). See the SANCTIONED FALSE-POSITIVE
  * ESCAPE note in the file header for the full contract.
  */
-const ALLOW_MARKER_RE = /leak-check:allow\s+(\S+)(?:\s*(?:—|--)\s*(.+))?\s*$/;
+const ALLOW_MARKER_HEAD_RE = /leak-check:allow\s+(\S+)(.*)$/;
+const ALLOW_SEPARATOR_RE = /^\s*(?:—|--)\s*([\s\S]*)$/;
 
 /** True when a "reason" is nothing but punctuation/whitespace — §4a: "Punctuation-only reasons don't count." */
 function isPunctuationOnlyReason(s: string): boolean {
@@ -266,14 +453,59 @@ interface AllowMarker {
   rule: string;
   /** null when absent or punctuation-only: a bare marker suppresses nothing. */
   reason: string | null;
+  /** true when there's trailing text after the rule name but no `—`/`--` separator was found. */
+  malformed: boolean;
 }
 
 function parseAllowMarker(line: string): AllowMarker | null {
-  const m = ALLOW_MARKER_RE.exec(line);
-  if (!m) return null;
-  const rawReason = m[2]?.trim() ?? "";
+  const head = ALLOW_MARKER_HEAD_RE.exec(line);
+  if (!head) return null;
+  const rule = head[1]!;
+  const rest = (head[2] ?? "").trim();
+  if (rest.length === 0) return { rule, reason: null, malformed: false };
+
+  const sep = ALLOW_SEPARATOR_RE.exec(rest);
+  if (!sep) return { rule, reason: null, malformed: true };
+
+  const rawReason = sep[1]!.trim();
   const reason = rawReason.length > 0 && !isPunctuationOnlyReason(rawReason) ? rawReason : null;
-  return { rule: m[1]!, reason };
+  return { rule, reason, malformed: false };
+}
+
+/**
+ * §4a: "Reasons are scrubbed of ids, emails, and codes before display, so an
+ * exemption can never become a disclosure channel." Applied to an HONOURED
+ * reason right before it's printed. A reason found to contain a finding
+ * (see reasonContainsFinding) is handled separately and never printed at all.
+ */
+function scrubReason(reason: string): string {
+  return reason
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+    .replace(/\b\d{6,}\b/g, "[id]");
+}
+
+/**
+ * A neutral display name for scanning a `leak-check:allow` REASON, not a
+ * file — no recognised extension, so the reason can never borrow the
+ * code-expression carve-out to hide a credential inside itself.
+ */
+const REASON_SCAN_DISPLAY = "leak-check-allow-reason";
+
+/**
+ * §4a / review on #35 (F3): a reason is scanned with every rule — built-in
+ * and operator — before it can be honoured. If it contains a finding, the
+ * marker is invalid: most concretely, this is what happens when the marker
+ * is placed BEFORE the credential it's meant to excuse — the credential ends
+ * up inside the "explanation", not beside it.
+ */
+function reasonContainsFinding(reason: string, allRules: Rule[]): boolean {
+  for (const rule of allRules) {
+    const m = rule.re.exec(reason);
+    if (!m) continue;
+    if (rule.accept && !rule.accept(m, { line: reason, display: REASON_SCAN_DISPLAY })) continue;
+    return true;
+  }
+  return false;
 }
 
 interface Finding {
@@ -286,6 +518,7 @@ interface Exemption {
   display: string;
   line: number;
   rule: string;
+  /** Already scrubbed — see scrubReason. Never the raw marker text. */
   reason: string;
 }
 
@@ -516,7 +749,7 @@ for (const target of targets) {
       // Fresh exec per line; no /g state to carry between lines.
       const m = rule.re.exec(line);
       if (!m) continue;
-      if (rule.accept && !rule.accept(m)) continue;
+      if (rule.accept && !rule.accept(m, { line, display: target.display })) continue;
 
       // A marker suppresses ONLY the rule it names, on the line it sits on —
       // a different rule's finding sharing that line is untouched.
@@ -525,9 +758,24 @@ for (const target of targets) {
           warnings.push(
             `${target.display}:${i + 1}: ${rule.name} is not exemptable via leak-check:allow — finding still blocks (leak-check-allow-unsupported)`,
           );
+        } else if (marker.malformed) {
+          warnings.push(
+            `${target.display}:${i + 1}: leak-check:allow ${rule.name} — marker has no \`—\`/\`--\` separator; finding still blocks (leak-check-allow-unjustified)`,
+          );
         } else if (marker.reason) {
-          exemptions.push({ display: target.display, line: i + 1, rule: rule.name, reason: marker.reason });
-          continue; // suppressed — not added to findings
+          if (reasonContainsFinding(marker.reason, allRules)) {
+            warnings.push(
+              `${target.display}:${i + 1}: leak-check:allow ${rule.name} — reason withheld: contains a finding; finding still blocks (leak-check-allow-unjustified)`,
+            );
+          } else {
+            exemptions.push({
+              display: target.display,
+              line: i + 1,
+              rule: rule.name,
+              reason: scrubReason(marker.reason),
+            });
+            continue; // suppressed — not added to findings
+          }
         } else {
           warnings.push(
             `${target.display}:${i + 1}: leak-check:allow ${rule.name} — marker present without a reason; finding still blocks (leak-check-allow-unjustified)`,
