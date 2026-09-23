@@ -47,7 +47,6 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
@@ -416,16 +415,19 @@ for (const fixture of GOVERNANCE_FIXTURES) {
 // G1 watched-failing proof: the check above, run against the EXACT bytes of
 // compass-governance.yml at commit 550cae9 (the round-2-submitted head),
 // which shipped types: [..., labeled, unlabeled] AND a job-level if: on
-// github.event.action. `git show` reads the historical blob directly — no
-// checkout, no mutation of the working tree.
+// github.event.action. The blob is committed as a fixture (see below), since
+// 550cae9 is not reachable from main after the squash merge.
 // ---------------------------------------------------------------------------
 
 describe("G1 — watched failing on 550cae9", () => {
   test("the exact workflow bytes committed at 550cae9 violate the G1 rule this round fixes", () => {
-    const raw = execFileSync(
-      "git",
-      ["show", "550cae9:templates/workflows/compass-governance.yml"],
-      { cwd: REPO, encoding: "utf8" },
+    // The bytes are committed as a fixture: 550cae9 lived only on the PR
+    // branch and is not reachable from main after the squash merge, so
+    // `git show` fails in CI. Captured with
+    // `git show 550cae9:templates/workflows/compass-governance.yml`.
+    const raw = readFileSync(
+      join(REPO, "engine", "__tests__", "fixtures", "compass-governance-550cae9.yml"),
+      "utf8",
     );
     const violations = findG1Violations(raw);
     expect(violations.length, "expected 550cae9 to violate G1 — if this is empty, the watched-failing proof is stale").toBeGreaterThan(
