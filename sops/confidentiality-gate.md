@@ -167,8 +167,10 @@ if that is not true of the id in front of you, fix the fixture instead.
 ### 4c. Private-corpus overlap check (`corpus-overlap.ts`)
 
 Before a PR leaves a shared repo, check its added lines for overlap with a private corpus you
-hold separately (for example an engagement's private jobs overlay) — the check this SOP used to
-leave to a hand-rolled `git grep -F -f`:
+hold separately (for example an engagement's private jobs overlay). This is **the** method for
+that check (#32) — before it, builders hand-rolled it themselves, differently each time, with
+`git grep -F -f` in their own working notes (see factory PR #265); this SOP carried no shingle,
+corpus, or `git grep` instructions to replace.
 
 ```bash
 bun engine/validators/corpus-overlap.ts \
@@ -176,26 +178,48 @@ bun engine/validators/corpus-overlap.ts \
   --base <merge-base-sha> --head <PR-head-sha>
 ```
 
-It breaks the diff's added lines into 6-word shingles (`--n` changes the size) and checks each one
-against the corpus via `git -C <corpus> grep`, read-only — it never writes to the corpus and never
-reads it any other way. Output is the shingle count, the match count, and each unreviewed match's
-shingle **text** — **never a corpus path, filename, or line**: the corpus is private, and this is
-the same withholding discipline as leak-check's NEVER-ECHO rule (§0).
+It breaks the diff's added lines into *n*-word shingles (`--n`, default 6) and checks the set
+against a shingle set built once from the corpus's **HEAD tree only** (`git -C <corpus> ls-tree` +
+`cat-file --batch`, read-only — it never writes to the corpus, never reads its working tree or
+index, and never touches the filesystem directly). Output is the shingle count, the match count,
+and each unreviewed match's shingle **text** — **never a corpus path, filename, or line**: the
+corpus is private, and this is the same withholding discipline as leak-check's NEVER-ECHO rule
+(§0).
 
-Before trusting a clean result, the tool draws a control shingle out of the corpus itself and
-confirms the search can find it there. If it can't — wrong path, empty checkout, a git failure —
-the run reports **INERT** (exit 2), not clean: a search never proven capable of finding a match
-cannot certify zero.
+**Any git failure, anywhere in the read, is INERT — never treated as "no match."** The corpus read
+(the tree listing, the batched object read, and their own internal consistency — an object count
+or a byte count that doesn't add up) and the diff read (cross-checked against a second,
+independent `git diff --numstat` run) are both verified this way. Before trusting a clean result,
+the tool also draws a control shingle out of the corpus's own shingle set and confirms it's a
+member of that same set — if none can be drawn (no commit, no file, no run of `--n` words anywhere
+in the corpus after whitespace normalisation), the run is INERT too. A search that degraded
+partway through and then reported zero matches would be indistinguishable from a clean result,
+and INERT (exit 2) exists so that never happens silently.
+
+The diff read is hardened against the PR under scan controlling its own visibility: `git diff` runs
+with `--no-ext-diff --no-textconv --text`, so a `.gitattributes` `-diff` marker, a `diff.external`
+config, or an embedded NUL byte cannot make the tool see an empty or binary-skipped diff. `--base`
+and `--head` are verified with `git rev-parse --verify --end-of-options` and refused outright if
+either looks like a flag (e.g. `--base=--output=<file>`) — a ref is data, never an option to the
+git commands it's passed to.
 
 **The benign list** (`.corpus-overlap-benign.yaml`, in the *consuming* repo, public) follows the
 same rule as §4b: each entry is `{shingle, reason, reviewed_by, date}` with a mandatory reason,
 and it is loaded from the PR's **base** commit, never its head — **no benign addition in the same
-PR as the match it excuses**. An honoured entry is counted in the output; a benign entry that no
-longer matches the corpus at all is reported **stale**, so the list doesn't accumulate dead
-carve-outs.
+PR as the match it excuses**. A malformed file at base (invalid YAML, a top-level mapping instead
+of a list, or any entry missing `shingle` or a non-empty `reason`) is a hard failure (exit 2,
+naming the file), never silently treated as empty. The benign file is itself scanned like any
+other added file — only shingles already honoured (parsed from base) are exempt, so a new entry
+added at head that happens to match the corpus flags itself, by construction. An honoured entry is
+counted in the output; a benign entry that no longer matches the corpus at all is reported
+**stale**, so the list doesn't accumulate dead carve-outs.
 
-Exit codes: `0` clean (matches honoured or none found), `1` unreviewed matches, `2` INERT or usage
-error.
+**Limits, not silently absorbed:** matching is case-sensitive, and HTML entities are not decoded
+(`&amp;` and a literal `&` are different words to the tokenizer). Both are tracked, not silently
+tolerated — see #36.
+
+Exit codes: `0` clean (matches honoured or none found), `1` unreviewed matches, `2` INERT (the
+control shingle couldn't be confirmed, or a read failed or was inconsistent) or a usage error.
 
 ---
 
