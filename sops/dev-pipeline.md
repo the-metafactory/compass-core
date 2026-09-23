@@ -69,9 +69,9 @@ Every issue for a detector, guard, check, or trust-path change states its **thre
 
 > catches accidental copy-paste of 6+ consecutive words of client material; deliberate evasion is out of scope and listed as known limits.
 
-Where deliberate evasion **is** in scope — credentials handling, CI trust paths — the issue says so, and the build and review are held to that higher bar instead. `sops/plan-breakdown.md` § Sub-issues (item 2, Current state) is where an executor-grade issue carries this; a hand-written issue states it in its own "why" section.
+Where deliberate evasion **is** in scope — credentials handling, CI trust paths — the issue says so, and the build and review are held to that higher bar instead. `sops/plan-breakdown.md` § Sub-issues — the executor-grade bar (item 2, Current state) is where an executor-grade issue carries this; a hand-written issue states it in its own "why" section.
 
-**Why this is a rule, not a nicety.** #32 — the issue behind `corpus-overlap.ts` (#34) — never said which model it wanted. Review then had to work it out one construction at a time: NUL-byte binary exemptions, phantom `+++` file headers, a filter check that compared itself to itself — three of #34's six review rounds (rounds 3–5), each opening ground the issue never scoped. `sops/pr-review.md` § Review Procedure (step 4) uses the stated threat model to decide, at review time, which of those findings actually block.
+**Why this is a rule, not a nicety.** #32 — the issue behind `corpus-overlap.ts` (#34) — never said which model it wanted. Review then had to work it out one construction at a time: round 3's H1 (a NUL-byte binary exemption) and round 4's J1 (a phantom `+++` file header) were both deliberate-evasion constructions the issue never scoped as in or out of bounds. `sops/pr-review.md` § Severity → Verdict § 4 uses the stated threat model to decide, at review time, which findings like these actually block.
 
 ## Detector-driven changes
 
@@ -94,8 +94,8 @@ A fix that adds a runtime self-check or internal cross-check — an assertion th
 
 A check that recomputes the same function from the same inputs and compares the two answers will agree however broken the logic is — it partitions or repeats the same computation by construction, so it can only catch a variable getting reassigned underneath it, never the logic itself being wrong. `sops/confidentiality-gate.md` § 4c documents this in detail for `corpus-overlap.ts`'s own checks; the review findings that forced the fix are the pattern to recognise:
 
-- **#34 K1.** A "filter check" computed `matches.filter(s => !fromRealDiff(s)).length` against `matches.length - matches.filter(fromRealDiff).length` — both derived from the same predicate over the same array, so they agreed for *any* predicate, including one forced to reject everything. The fix: recompute the expected set from the diff's own added lines alone, before any filtering runs, and require the reported matches to equal it exactly.
-- **factory #277 Q1 / #280 V1.** Two ledger-tally reconciliation asserts each checked a count derived from `rows` against another value derived from those same `rows` — a bug that mis-tallied both the same way was invisible to either. The fix: reconcile against the reports actually *loaded*, counted before any row is built, not against the rows the primary computation already produced.
+- **#34 K1.** A "filter check" computed `matches.filter(s => !fromRealDiff(s)).length` against `matches.length - matches.filter(fromRealDiff).length` — both derived from the same predicate over the same array, so they agreed for *any* predicate, including one forced to reject everything. The fix: recompute the expected set as `runsToShingles(addedRuns) ∩ corpusHas` — the diff's own added lines, shingled and intersected with the same corpus lookup the control already exercises, not the added lines alone — before any filtering runs, and require the reported matches to equal it exactly.
+- **factory #277 Q1 / #280 V1.** Two ledger-tally reconciliation asserts each checked a count derived from `rows` against another value derived from those same `rows` — a bug that mis-tallied both the same way was invisible to either. The fix: reconcile against the reports actually *loaded* plus the receipt's own per-artboard digests, both available before any row is built, not against the rows the primary computation already produced.
 
 ## PR Body
 

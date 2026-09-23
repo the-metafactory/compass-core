@@ -75,7 +75,7 @@ The running, honest narrative to the team channel is a **first-class deliverable
 
 ## 6. Discipline rails
 
-All of [`autonomous-work.md` §5](./autonomous-work.md#5-discipline-rails) apply unchanged — **honor HOLDs, never self-grant authority, escalate don't guess, never assert without verification, ask before destructive/outward-facing actions.** Two carry extra weight here because the loop is fast and public:
+All of [`autonomous-work.md` §5](./autonomous-work.md#5-discipline-rails) apply unchanged — **honor HOLDs, never self-grant authority, escalate don't guess, stop after two rounds, never assert without verification, ask before destructive/outward-facing actions.** Three carry extra weight here because the loop is fast and public:
 
 - **The narrative cannot outrun the evidence.** Never post "shipped" / "green" / "deployed" before you've verified it with your own tools. A public unverified claim is the most expensive kind.
 - **A held action you *narrated as ready* is still held.** "Ready to deploy — your nod?" is the post. Running the deploy is not, until the nod arrives.

@@ -28,7 +28,7 @@ SOP: pr-review | PR: {owner/repo}#{N} | Workflow: {Standard/Security/Full}
 | **Compliance** | CLAUDE.md present + valid, arc-manifest.yaml correct, labels per `compass.config.yaml`, conventional commits |
 | **Performance** | N+1 queries, unbounded loops, missing pagination, blocking calls in async |
 
-7. **Apply the detector-driven-change probe** from `sops/pr-review.md` § Review Procedure — for each *Detector hits* entry, compare the diff to the finding and check `git log -p` over the changed fixture/test files for a rewrite with no behaviour change. **Blockers only inside the model:** a finding blocks only if it's reachable under the issue's stated threat model, regresses working behaviour, or contradicts a claim in the PR/docs/code — otherwise it goes under *Known limits, for an issue* and the PR can merge (`sops/pr-review.md` § Review Procedure, step 4; worked examples at #34 rounds 3–5 and #48 round 3).
+7. **Apply the detector-driven-change probe** from `sops/pr-review.md` § Review Procedure — for each *Detector hits* entry, compare the diff to the finding and check `git log -p` over the changed fixture/test files for a rewrite with no behaviour change. Where the issue states a threat model, apply `sops/pr-review.md` § Severity → Verdict § 4 to every finding, not only detector hits — a Compliance blocker below and the confidentiality carve-out are never reclassified by it.
 8. **Categorize each finding** as Blocker / Should-fix / Nit.
 9. **Post structured comments.** Per-finding inline comments are preferred over a single review essay.
 10. **Submit the review** with the appropriate action: approve / request-changes / comment.
