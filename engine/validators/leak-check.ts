@@ -180,6 +180,76 @@
  *   rule exists to prevent. Naming any of these still blocks the finding and
  *   prints `leak-check-allow-unsupported`.
  *
+ * CREDENTIAL KEY NAMES MATCH AS THE LAST SEGMENT OF AN IDENTIFIER (issue #37):
+ * the leading edge of `credential-assignment`'s key alternation used to be a
+ * plain `\b`, which never fires between two word characters — and `_` IS a
+ * word character to `\b`. `DISCORD_TOKEN=`, `GITLAB_TOKEN=`, `OPENAI_API_KEY=`
+ * and `AWS_SECRET_ACCESS_KEY=` (the `.env` shape most likely to hold a real
+ * secret) all produced zero findings as a result. The fix widens what counts
+ * as a valid start for the key phrase to three shapes, checked by
+ * `isValidCredentialKeyBoundary` against the RAW (case-preserved) line text,
+ * never through the pattern's own `i` flag (which would fold case and defeat
+ * a camelCase check):
+ *   1. Start of line, or preceded by anything that is not `[A-Za-z0-9]` —
+ *      this already covered a plain word boundary and kebab-case
+ *      (`foo-api-key`, since `-` was never a word character); it now also
+ *      covers `_` (`FOO_TOKEN`, `foo_secret`), because `_` is deliberately
+ *      excluded from that class.
+ *   2. A genuine camelCase transition: the character immediately before the
+ *      key phrase is a lowercase ASCII letter AND the key phrase's own first
+ *      character (read from the source, not case-folded) is uppercase —
+ *      `fooSecret`, `FooPassword`. `mytoken` (lowercase throughout, no
+ *      transition) does NOT qualify and stays unflagged, same as before.
+ *   3. Nothing else. A digit or an uppercase letter immediately before the
+ *      key phrase is never a valid segment start.
+ * The regex itself is only widened enough to let the ENGINE consider these
+ * candidate positions (`(?:(?<![A-Za-z0-9])|(?<=[a-z]))` in place of `\b`);
+ * `isValidCredentialKeyBoundary`, called first inside `accept`, is what
+ * actually enforces the three shapes above.
+ *
+ * The TRAILING side is unchanged and untouched by this issue: the key phrase
+ * must still be immediately (modulo whitespace) followed by `:`/`=` for the
+ * whole rule to match at all. That is a regex-level requirement, not an
+ * `accept`-level one, and it is what already excludes `tokenizer = x`,
+ * `secretaryName = x` (the key phrase is a PREFIX of a longer identifier,
+ * followed by more identifier characters before any operator — the regex
+ * itself finds no match anywhere on the line) and a TYPE ANNOTATION such as
+ * `passwordField: string` (same reason: "password" is a prefix of
+ * "passwordField", not its last segment, so the whole pattern never matches
+ * at all — there is no separate "is this a type annotation" case to decide,
+ * because the identifier shape alone already disqualifies it). DECISION: a
+ * key name is recognised only when it is the LAST segment of the identifier
+ * immediately left of the operator; a type annotation's declared name never
+ * qualifies unless the credential word IS that whole trailing segment
+ * (`secretKey: string` — "secret" is not "secretKey"'s last segment either,
+ * still unmatched). When the credential word IS the whole key, a type
+ * annotation gets no special exemption: `secret: SomeType` still matches — leak-check:allow credential-assignment — worked example of the shape this rule matches; not a real value, kept literal on purpose
+ * the same as any other bare, unquoted, non-code-shaped value would. A
+ * genuinely code-shaped type reference is still covered by the existing
+ * code-expression carve-out for `.ts`/`.tsx`/etc., not by anything new here.
+ *
+ * Widening the leading boundary also widens which line positions the regex
+ * itself succeeds at, which interacts with `credential-assignment`'s
+ * `accept`-based rejection (the code-expression carve-out, and now
+ * `isValidCredentialKeyBoundary`): a single `RegExp.exec` only ever reports
+ * the FIRST position where the whole pattern matches, so if THAT position is
+ * rejected by `accept`, a real finding later on the same line could go
+ * unseen. `firstAcceptedMatch` closes this for every rule that defines
+ * `accept`: it retries at the next position (via a cloned global regex)
+ * until one is accepted or the candidates run out, rather than giving up
+ * after the first rejection.
+ *
+ * ZERO-WIDTH CHARACTERS ARE STRIPPED BEFORE ANY RULE OR THE DENYLIST SEES
+ * CONTENT (issue #37): U+200B (ZERO WIDTH SPACE), U+200C (ZERO WIDTH
+ * NON-JOINER), U+200D (ZERO WIDTH JOINER) and U+FEFF (ZERO WIDTH NO-BREAK
+ * SPACE / BOM) are invisible in a rendered diff or PR comment but split a
+ * literal substring match apart — a denylisted term (or a credential shape)
+ * with one spliced into the middle of it passed every rule and the denylist
+ * on main. `stripZeroWidth` runs once per scanned line (and once on a
+ * `leak-check:allow` reason before it is checked for a finding) before
+ * anything else touches that text — see the call sites in the main scan
+ * loop and in `reasonContainsFinding`.
+ *
  * Exit codes: 0 = clean, 1 = findings, 2 = usage/configuration error.
  */
 
@@ -292,11 +362,16 @@ const RULES: Rule[] = [
     // literal (including backtick-quoted), or — narrowly, see the file
     // header — a code expression.
     re: new RegExp(
-      '\\b(?:pass(?:word|wd)|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)\\b\\s*[:=]\\s*' +
+      '(?:(?<![A-Za-z0-9])|(?<=[a-z]))(?:pass(?:word|wd)|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)\\b\\s*[:=]\\s*' +
         `(?:"([^"\\n]*)"|'([^'\\n]*)'|\`([^\`\\n]*)\`|(${UNQUOTED_CHAR}+))`,
       "i",
     ),
     accept: (m, ctx) => {
+      // Last-segment-of-an-identifier check — see CREDENTIAL KEY NAMES in
+      // the file header. Must run before anything else: a rejected boundary
+      // means this isn't a credential key at all, independent of the value.
+      if (!isValidCredentialKeyBoundary(ctx.line, m.index)) return false;
+
       // A backtick-quoted value is a literal by construction — never
       // code-exempt, same as "…"/'…'. See BACKTICK HANDLING.
       const backtickQuoted = m[3];
@@ -328,12 +403,73 @@ const RULES: Rule[] = [
  * `credential-assignment` rule, too tight and the rule cries wolf until someone
  * deletes the hook.
  */
-// Note the `[-_]` after your/my/sample/fake/example: those words only mean
-// "placeholder" when they head a hyphenated stand-in (`your-api-key`,
-// `my_token_here`). Without the separator the alternation is greedy enough to
-// swallow real secrets — `mysecretvalue123` would suppress itself.
+// Note the `[-_]` after your/my/sample/fake/example/not/should/never: those
+// words only mean "placeholder" when they head a hyphenated stand-in
+// (`your-api-key`, `my_token_here`, `not-a-real-token`). Without the
+// separator the alternation is greedy enough to swallow real secrets —
+// `mysecretvalue123` would suppress itself.
+//
+// `not`/`should`/`never` (issue #37): the widened last-segment key match now
+// reaches a dotted/nested property key it never used to (`doc.x.api_token =
+// "…"`, `{ cloudflare_api_token: "…" }`) — a shape common in test fixtures
+// asserting that a field name alone is enough to trip a *different* check.
+// Those fixtures' values are hand-written English disclaimers, not
+// credentials — `"not-a-real-token"`, `"should-never-be-here"` — found by
+// this issue's own factory-scan probe (metafactory-factory-website, 2 new
+// findings on a rule change that must add none). Same prefix-stand-in shape
+// as your/my/sample/fake/example/dummy/replace, just the words engineers
+// reach for to say "this is fake" instead of "this is a placeholder".
 const PLACEHOLDER =
-  /^(?:x+|\*+|\.+|-+|_+|change[-_ ]?me|redacted|placeholder|unset|dummy|test|todo|tbd|none|null|nil|true|false|undefined|empty|secret|password|token|(?:your|my|sample|fake|example|dummy|replace)[-_][a-z0-9_-]*)$/i;
+  /^(?:x+|\*+|\.+|-+|_+|change[-_ ]?me|redacted|placeholder|unset|dummy|test|todo|tbd|none|null|nil|true|false|undefined|empty|secret|password|token|(?:your|my|sample|fake|example|dummy|replace|not|should|never)[-_][a-z0-9_-]*)$/i;
+
+/**
+ * Last-segment-of-an-identifier check for `credential-assignment`'s key
+ * phrase — see CREDENTIAL KEY NAMES MATCH AS THE LAST SEGMENT OF AN
+ * IDENTIFIER in the file header (issue #37). `line` and `keyStart` are the
+ * RAW, case-preserved scanned text and the index the key phrase starts at —
+ * never derived from anything the pattern's `i` flag has case-folded.
+ */
+function isValidCredentialKeyBoundary(line: string, keyStart: number): boolean {
+  if (keyStart <= 0) return true; // start of line — always a valid segment start
+  const prev = line[keyStart - 1]!;
+  if (!/[A-Za-z0-9]/.test(prev)) return true; // `_`, `-`, whitespace, quote, punctuation…
+  if (!/[a-z]/.test(prev)) return false; // an uppercase letter or a digit — never a segment start
+  const first = line[keyStart]!;
+  return /[A-Z]/.test(first); // only a genuine camelCase transition qualifies
+}
+
+/**
+ * Zero-width characters an attacker (or an accident) can splice into a
+ * denylisted term or a credential shape to break a literal regex match while
+ * leaving the text visually unchanged — see ZERO-WIDTH CHARACTERS ARE
+ * STRIPPED in the file header (issue #37). Stripped once per scanned line,
+ * before any rule or the denylist runs — see the main scan loop and
+ * `reasonContainsFinding`.
+ */
+const ZERO_WIDTH_RE = /[​-‍﻿]/g;
+function stripZeroWidth(s: string): string {
+  return s.replace(ZERO_WIDTH_RE, "");
+}
+
+/**
+ * Finds the first match of `rule` in `text` that `rule.accept` (if any)
+ * actually accepts, trying successive candidate positions rather than
+ * giving up after the first rejected one — see the file header's note on
+ * why a single non-retrying `exec` can miss a real finding later on the
+ * same line once `accept` can reject a match (issue #37). A rule with no
+ * `accept` callback never rejects, so this is a plain `exec` for it.
+ */
+function firstAcceptedMatch(rule: Rule, text: string, ctx: AcceptContext): RegExpExecArray | null {
+  if (!rule.accept) return rule.re.exec(text);
+  const flags = rule.re.flags.includes("g") ? rule.re.flags : `${rule.re.flags}g`;
+  const re = new RegExp(rule.re.source, flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (rule.accept(m, ctx)) return m;
+    if (re.lastIndex === m.index) re.lastIndex++; // never loop forever on a zero-length match
+  }
+  return null;
+}
 
 function isPlaceholder(value: string): boolean {
   const v = value.trim();
@@ -499,11 +635,10 @@ const REASON_SCAN_DISPLAY = "leak-check-allow-reason";
  * up inside the "explanation", not beside it.
  */
 function reasonContainsFinding(reason: string, allRules: Rule[]): boolean {
+  const cleaned = stripZeroWidth(reason);
+  const ctx: AcceptContext = { line: cleaned, display: REASON_SCAN_DISPLAY };
   for (const rule of allRules) {
-    const m = rule.re.exec(reason);
-    if (!m) continue;
-    if (rule.accept && !rule.accept(m, { line: reason, display: REASON_SCAN_DISPLAY })) continue;
-    return true;
+    if (firstAcceptedMatch(rule, cleaned, ctx)) return true;
   }
   return false;
 }
@@ -738,18 +873,21 @@ const warnings: string[] = [];
 for (const target of targets) {
   const lines = target.text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+    // Zero-width characters stripped before ANY rule or the denylist sees
+    // this line — see ZERO-WIDTH CHARACTERS ARE STRIPPED in the file header.
+    const line = stripZeroWidth(lines[i]!);
     if (line.length === 0) continue;
 
     // Computed once per line — it doesn't depend on which rule fired, only
     // on which rule (if any) the marker names.
     const marker = parseAllowMarker(line);
+    const ctx: AcceptContext = { line, display: target.display };
 
     for (const rule of allRules) {
-      // Fresh exec per line; no /g state to carry between lines.
-      const m = rule.re.exec(line);
+      // Fresh search per line; no /g state to carry between lines. Retries
+      // past a rejected candidate — see firstAcceptedMatch.
+      const m = firstAcceptedMatch(rule, line, ctx);
       if (!m) continue;
-      if (rule.accept && !rule.accept(m, { line, display: target.display })) continue;
 
       // A marker suppresses ONLY the rule it names, on the line it sits on —
       // a different rule's finding sharing that line is untouched.

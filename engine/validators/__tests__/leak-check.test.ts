@@ -45,6 +45,8 @@ const FAKE = {
   callShapedSecret: "fake(" + "9f8e7d6c-5b4a-3210-9d3e-9d3e9d3e9d3e" + ")",
   // A JS template-literal-shaped value: backtick-quoted, 24+ chars inside.
   templateLiteral: "Qx7f".repeat(6),
+  // issue #37 — a 40-character synthetic value for the env-style key tests.
+  envValue: "Az9k".repeat(10),
 };
 
 let tmp: string;
@@ -836,5 +838,187 @@ describe("leak-check.ts — F6: a marker with no separator warns", () => {
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain("no-sep.ts:1: credential-assignment");
     expect(r.output.toLowerCase()).toContain("separator");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #37 — `credential-assignment`'s key alternation was anchored with a
+// plain `\b`, which never fires between two word characters, and `_` IS a
+// word character. `FOO_TOKEN=`, `foo_secret=` etc. produced 0 findings on
+// main. Fix: match the key name as the LAST SEGMENT of an identifier —
+// preceded by a non-alnum separator (including `_`, previously excluded) or
+// a genuine camelCase transition — not only as a fully standalone word.
+//
+// "[watched]" tests here were confirmed to give 0 findings against
+// origin/main and are expected to block after the fix.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — issue #37: SCREAMING_SNAKE env-style credential keys", () => {
+  // Every combination below is 0 findings on origin/main (the `_` before the
+  // key word defeats `\b`) and must block after the fix.
+  const keys = ["DISCORD_TOKEN", "GITLAB_TOKEN", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY"];
+  const shapes: [string, string, (key: string, value: string) => string][] = [
+    [".env", "dotenv", (key, value) => `${key}=${value}\n`],
+    [".yml", "yaml", (key, value) => `${key}: ${value}\n`],
+    [".sh", "shell script (export)", (key, value) => `export ${key}=${value}\n`],
+  ];
+
+  for (const key of keys) {
+    for (const [ext, label, render] of shapes) {
+      test(`[watched] ${key}= (40-char synthetic value) in a ${label} file is flagged`, () => {
+        const f = write(`fixture${ext}`, render(key, FAKE.envValue));
+        const r = run([f]);
+        expect(r.exitCode).toBe(1);
+        expect(r.output).toContain("credential-assignment");
+        expect(r.output).not.toContain(FAKE.envValue);
+      });
+    }
+  }
+});
+
+describe("leak-check.ts — issue #37: last-segment matching, other identifier shapes", () => {
+  test("[watched] a kebab-case key (foo-api-key) is flagged", () => {
+    const f = write("kebab.yml", `foo-api-key: ${FAKE.envValue}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a camelCase key (fooSecret) is flagged", () => {
+    const f = write("camel.ts", `fooSecret = ${FAKE.envValue}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a PascalCase-suffixed key (FooPassword) is flagged", () => {
+    const f = write("pascal.yml", `FooPassword: ${FAKE.envValue}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  // Regression guards: the widened leading boundary must not create new
+  // false positives on ordinary identifiers where the credential word is a
+  // PREFIX, not the last segment, of a longer name — the trailing boundary
+  // (unchanged by this issue) already excludes these, and stays excluded.
+  test("tokenizer = <value> is not flagged (credential word is a prefix, not the last segment)", () => {
+    const f = write("tokenizer.ts", `const tokenizer = ${FAKE.envValue};\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("secretaryName = <value> is not flagged", () => {
+    const f = write("secretary.ts", `const secretaryName = ${FAKE.envValue};\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("keyboard = <value> is not flagged (\"key\" alone is not a credential word)", () => {
+    const f = write("keyboard.ts", `const keyboard = ${FAKE.envValue};\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  // DECISION (see the file header): a type annotation's declared name is
+  // never specially cased — it is excluded by the same last-segment rule as
+  // any other identifier. "password" is a prefix of "passwordField", not its
+  // last segment, so the pattern never matches at all.
+  test('passwordField: string (a type annotation) is not flagged', () => {
+    const f = write("type-annotation.ts", "interface Cfg {\n  passwordField: string;\n}\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a lowercase run with no separator and no case transition (mytoken) is not flagged", () => {
+    const f = write("mytoken.ts", `const mytoken = ${FAKE.envValue};\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #37 — zero-width characters (U+200B–U+200D, U+FEFF) slipped past the
+// denylist (and every built-in rule): spliced into the middle of a
+// denylisted term, they break the literal substring match while leaving the
+// text visually unchanged. Fix: strip them from scanned content before any
+// rule or the denylist runs.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — issue #37: zero-width characters are stripped before matching", () => {
+  test("[watched] a denylisted term split by a zero-width character is still caught", () => {
+    // Uses the test harness's own operator-pattern mechanism (--patterns),
+    // same as the existing operator-pattern tests above — not a built-in
+    // rule. The zero-width character is assembled at runtime, never typed
+    // literally next to the term it splits.
+    const patterns = write("denylist.txt", "SilverBirchLedger\n");
+    const zeroWidthSpace = "​";
+    const content = "Silver" + "Birch" + zeroWidthSpace + "Ledger" + " appears in this document\n";
+    const f = write("doc.md", content);
+    const r = run([f, "--patterns", patterns]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("denylist[1]");
+    expect(r.output).toContain("doc.md:1");
+  });
+
+  test("[watched] a built-in credential shape split by a zero-width character is still caught", () => {
+    const zeroWidthJoiner = "‍";
+    const content = "DISCORD" + "_" + "TO" + zeroWidthJoiner + "KEN" + "=" + FAKE.envValue + "\n";
+    const f = write("zw.env", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("a zero-width character elsewhere on a clean line does not create a false positive", () => {
+    const zeroWidthNonJoiner = "‌";
+    const content = "Just" + zeroWidthNonJoiner + " prose about governance, nothing sensitive here.\n";
+    const f = write("clean-zw.md", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #37 — the last-segment widening reaches a dotted/nested property key
+// it never used to (`doc.x.api_token = "…"`, `{ cloudflare_api_token: "…" }`)
+// — a shape a test fixture commonly uses to assert that a field NAME alone
+// trips a different check, paired with a hand-written English disclaimer as
+// the "value", not a credential. Found by this issue's own factory-scan
+// probe (metafactory-factory-website): 0 findings on origin/main, 2 new
+// ones on the widened rule, both this shape. Fix: widen the PLACEHOLDER
+// prefix-word list (your/my/sample/fake/example/dummy/replace) to also
+// recognise not/should/never as a placeholder-prefix stand-in.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — issue #37: English-disclaimer placeholders on a dotted/nested key", () => {
+  test("a dotted property assignment with a 'not-a-real-…' placeholder is not flagged", () => {
+    const f = write(
+      "fixture.mjs",
+      'doc.environment.hosting.api_token = "not-a-real-value-for-this-test";\n',
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("an object-literal key with a 'should-never-…' placeholder is not flagged", () => {
+    const f = write(
+      "fixture.mjs",
+      '({ cloudflare_api_token: "should-never-appear-in-output" });\n',
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("'not'/'should'/'never' only suppress as a hyphenated PREFIX — a real value merely containing one of those words still blocks", () => {
+    // Guards against the widened PLACEHOLDER list being loose enough to
+    // swallow a real secret that happens to start with one of these words
+    // with no separator — same shape as the existing `mysecretvalue123`
+    // guard for your/my/sample/fake/example/dummy/replace.
+    const bare = "notreallyasecretvalue1234567890";
+    const f = write("real.env", `API_KEY=${bare}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
   });
 });
