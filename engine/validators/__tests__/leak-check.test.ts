@@ -47,6 +47,10 @@ const FAKE = {
   templateLiteral: "Qx7f".repeat(6),
   // issue #37 — a 40-character synthetic value for the env-style key tests.
   envValue: "Az9k".repeat(10),
+  // #42 review, F1 — a 36-character base64url-ish synthetic value (letters +
+  // digits, no hyphen/underscore of its own) for the `not-`/`should-`/`never-`
+  // prefix guard tests.
+  base64ish36: "Qx7f".repeat(9),
 };
 
 let tmp: string;
@@ -1020,5 +1024,213 @@ describe("leak-check.ts — issue #37: English-disclaimer placeholders on a dott
     const r = run([f]);
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain("credential-assignment");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #42 review, F1 — the first cut's `(?:not|should|never)[-_][a-z0-9_-]*`
+// prefix shared the same single-separator shape as your/my/sample/etc., and
+// that character class is (almost) the whole base64url alphabet: ANY value
+// starting `not-`/`not_`/`should-`/`never-` was swallowed regardless of what
+// followed, including a real secret or a human password that merely starts
+// with one of those words. Fix: require at least two MORE hyphen-separated,
+// letter-only words after the lead word — the shape of the two factory
+// fixtures this was widened for, not the shape of a real secret.
+//
+// "[watched]" tests were confirmed to PASS EVERY RULE (0 findings) on this
+// branch's pre-review head (`ec9baa2`) and are BLOCKED after the fix.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #42 review F1: not/should/never only suppress a hyphenated ENGLISH PHRASE", () => {
+  const b64 = FAKE.base64ish36; // 36 chars, letters + digits, no separator of its own
+
+  // Titles below describe the shape without spelling "<keyword><separator>"
+  // as literal adjacent text — that phrase is what credential-assignment
+  // looks for, and this test file's own source is itself scanned. See the
+  // file's opening note: no credential-shaped literal appears in this file.
+  test("[watched] a 'token' key with a not-prefixed 36-char base64url-ish value (.yml) still blocks", () => {
+    const f = write("f1-1.yml", `token: not-${b64}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a 'token' key with a quoted not_-prefixed 36-char value (.ts) still blocks", () => {
+    const f = write("f1-2.ts", `token: "not_${b64}"\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a 'token' key with a should-prefixed 36-char value (.yml) still blocks", () => {
+    const f = write("f1-3.yml", `token: should-${b64}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a 'token' key with an uppercase NOT-prefixed 36-char value (.yml) still blocks", () => {
+    const f = write("f1-4.yml", `token: NOT-${b64.toUpperCase()}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] an env-style TOKEN key with a never-prefixed 36-char value still blocks", () => {
+    const f = write("f1-5.env", `API_TOKEN=never-${b64}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a human password of the shape not_my_password_2024 still blocks", () => {
+    // Built from fragments, and the key/separator/value are separate string
+    // literals — never contiguous "password" + ":" as raw source text.
+    const f = write("f1-6.ts", "password" + ": " + "not_my_password_2024" + "\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a human password of the shape never-guess-me-99 still blocks", () => {
+    const f = write("f1-7.ts", "password" + ": " + "never-guess-me-99" + "\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("never<36-char value>, no separator, still blocks (regression guard — was already correct)", () => {
+    const f = write("f1-8.ts", `token: never${b64}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  // Controls: the two factory-fixture shapes this widening exists for must
+  // still pass, both before and after the F1 tightening.
+  test('control: "not-a-real-token" is still not flagged', () => {
+    const f = write("f1-control-1.ts", 'password: "not-a-real-token"\n');
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('control: "should-never-be-here" is still not flagged', () => {
+    const f = write("f1-control-2.ts", 'password: "should-never-be-here"\n');
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #42 review, F2 — `firstAcceptedMatch` resumed each retry at the END of
+// a rejected candidate match. Before the boundary rule moved into the regex
+// itself, a rejected candidate (`token` inside `mytoken`, matched only
+// because the old `/i`-folded lookbehind let the engine consider it) had its
+// own greedy unquoted-value capture run to the next whitespace — swallowing
+// a REAL key embedded in that "value" with no space before it. Fix: the
+// boundary rule now lives in the regex (case-explicit key alternation, no
+// `/i` flag), so the engine never produces that candidate at all — nothing
+// is ever swallowed, and the retry loop stays linear.
+//
+// "[watched]" tests were confirmed to PASS EVERY RULE (0 findings) on this
+// branch's pre-review head (`ec9baa2`) and are BLOCKED after the fix.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #42 review F2: a rejected candidate must not swallow the next real key", () => {
+  test("[watched] ?mytoken=abc&auth_token=<40> — the real key after an unmatched 'mytoken' still blocks", () => {
+    const f = write("f2-1.txt", `GET /path?mytoken=abc&auth_token=${FAKE.envValue}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] GITTOKEN=a&AUTH_TOKEN=<40> — the real key after a no-separator 'GITTOKEN' still blocks", () => {
+    const f = write("f2-2.env", `GITTOKEN=a&AUTH_TOKEN=${FAKE.envValue}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] atoken=token=<40> — the real key after a lowercase-attached 'atoken' still blocks", () => {
+    const f = write("f2-3.txt", `atoken=token=${FAKE.envValue}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("a 140 KB line of repeated 'atoken=' finishes in well under 2s (no pathological backtracking)", () => {
+    const line = "atoken=".repeat(20000); // ~140 KB
+    const f = write("f2-timing-140k.txt", line + "\n");
+    const start = Date.now();
+    const r = run([f]);
+    const elapsedMs = Date.now() - start;
+    expect(r.exitCode).toBe(0); // no real key anywhere on the line — clean
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  test("a 700 KB line of repeated 'atoken=' finishes in under 2s", () => {
+    const line = "atoken=".repeat(100000); // ~700 KB
+    const f = write("f2-timing-700k.txt", line + "\n");
+    const start = Date.now();
+    const r = run([f]);
+    const elapsedMs = Date.now() - start;
+    expect(r.exitCode).toBe(0);
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #42 review — U+2060 WORD JOINER and U+00AD SOFT HYPHEN split a
+// denylisted term or a credential key just as invisibly as the four
+// characters #37 already covered (U+200B–D, U+FEFF), and both still passed
+// every rule before this fix.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #42 review: U+2060 and U+00AD are also stripped", () => {
+  test("[watched] a denylisted term split by U+2060 WORD JOINER is caught", () => {
+    const patterns = write("denylist-wj.txt", "CobaltMeridian\n");
+    const wordJoiner = "⁠";
+    const content = "Cobalt" + wordJoiner + "Meridian" + " appears in this document\n";
+    const f = write("wj.md", content);
+    const r = run([f, "--patterns", patterns]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("denylist[1]");
+  });
+
+  test("[watched] a denylisted term split by U+00AD SOFT HYPHEN is caught", () => {
+    const patterns = write("denylist-sh.txt", "AmberFathom\n");
+    const softHyphen = "­";
+    const content = "Amber" + softHyphen + "Fathom" + " appears in this document\n";
+    const f = write("sh.md", content);
+    const r = run([f, "--patterns", patterns]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("denylist[1]");
+  });
+
+  test("[watched] a built-in credential shape split by U+2060 is caught", () => {
+    const wordJoiner = "⁠";
+    const content = "DISCORD" + "_" + "TO" + wordJoiner + "KEN" + "=" + FAKE.envValue + "\n";
+    const f = write("wj.env", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("[watched] a built-in credential shape split by U+00AD is caught", () => {
+    const softHyphen = "­";
+    const content = "DISCORD" + "_" + "TO" + softHyphen + "KEN" + "=" + FAKE.envValue + "\n";
+    const f = write("sh.env", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("credential-assignment");
+  });
+
+  test("U+2060/U+00AD elsewhere on a clean line do not create a false positive", () => {
+    const wordJoiner = "⁠";
+    const softHyphen = "­";
+    const content = "Just" + wordJoiner + " prose" + softHyphen + " about governance, nothing sensitive.\n";
+    const f = write("clean-invisible.md", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
   });
 });
