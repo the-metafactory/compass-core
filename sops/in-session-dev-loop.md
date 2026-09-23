@@ -79,6 +79,7 @@ All of [`autonomous-work.md` §5](./autonomous-work.md#5-discipline-rails) apply
 
 - **The narrative cannot outrun the evidence.** Never post "shipped" / "green" / "deployed" before you've verified it with your own tools. A public unverified claim is the most expensive kind.
 - **A held action you *narrated as ready* is still held.** "Ready to deploy — your nod?" is the post. Running the deploy is not, until the nod arrives.
+- **Stop after two rounds** applies here too — see [`autonomous-work.md` § 5](./autonomous-work.md#5-discipline-rails): two `changes-requested` rounds on one PR and the main session decides (re-plan / split / bring to the principal) before dispatching a third fix.
 
 ---
 

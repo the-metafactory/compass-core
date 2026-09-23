@@ -63,6 +63,16 @@ refactor: extract label parsing into shared util
 7. **Merge** — Squash or merge to the default branch. Delete the feature branch. For worktree-based work, follow the full cleanup procedure in [`sops/worktree-discipline.md`](./worktree-discipline.md#cleanup) (remove worktree → delete local branch → delete remote branch → sync primary worktree).
 8. **Version** — Bump `{{config:versioning.manifest}}`, commit, push, create release.
 
+## Threat model in the issue
+
+Every issue for a detector, guard, check, or trust-path change states its **threat model** and what "done" means **before the build starts.** Name what it catches and what it doesn't:
+
+> catches accidental copy-paste of 6+ consecutive words of client material; deliberate evasion is out of scope and listed as known limits.
+
+Where deliberate evasion **is** in scope — credentials handling, CI trust paths — the issue says so, and the build and review are held to that higher bar instead. `sops/plan-breakdown.md` § Sub-issues (item 2, Current state) is where an executor-grade issue carries this; a hand-written issue states it in its own "why" section.
+
+**Why this is a rule, not a nicety.** #32 — the issue behind `corpus-overlap.ts` (#34) — never said which model it wanted. Review then had to work it out one construction at a time: NUL-byte binary exemptions, phantom `+++` file headers, a filter check that compared itself to itself — three of #34's six review rounds (rounds 3–5), each opening ground the issue never scoped. `sops/pr-review.md` § Review Procedure (step 4) uses the stated threat model to decide, at review time, which of those findings actually block.
+
 ## Detector-driven changes
 
 **The test:** would we make this change if the detector didn't exist?
@@ -77,6 +87,15 @@ A detector hit — a linter, a leak scanner, a CI gate, any automated red — re
 - (c) **Left open**, filed as an issue.
 
 **Rewording until it passes is not a resolution.** Rewriting a fixture, renaming a variable, or restructuring a test line so a scanner stops matching — with no change to the desired state — is evasion under the test above, whichever of the three resolutions it's dressed up as. It gets refused in review (`sops/pr-review.md`) whether or not the author meant it that way.
+
+## Independent source for a self-check
+
+A fix that adds a runtime self-check or internal cross-check — an assertion the code runs against itself to prove its own output is right — must name, in the brief and the PR body, an **independent source for the expected value: one that exists before the checked thing is built.** If no such source exists, the fix deletes the claim the check was meant to support and relies on tests instead.
+
+A check that recomputes the same function from the same inputs and compares the two answers will agree however broken the logic is — it partitions or repeats the same computation by construction, so it can only catch a variable getting reassigned underneath it, never the logic itself being wrong. `sops/confidentiality-gate.md` § 4c documents this in detail for `corpus-overlap.ts`'s own checks; the review findings that forced the fix are the pattern to recognise:
+
+- **#34 K1.** A "filter check" computed `matches.filter(s => !fromRealDiff(s)).length` against `matches.length - matches.filter(fromRealDiff).length` — both derived from the same predicate over the same array, so they agreed for *any* predicate, including one forced to reject everything. The fix: recompute the expected set from the diff's own added lines alone, before any filtering runs, and require the reported matches to equal it exactly.
+- **factory #277 Q1 / #280 V1.** Two ledger-tally reconciliation asserts each checked a count derived from `rows` against another value derived from those same `rows` — a bug that mis-tallied both the same way was invisible to either. The fix: reconcile against the reports actually *loaded*, counted before any row is built, not against the rows the primary computation already produced.
 
 ## PR Body
 
