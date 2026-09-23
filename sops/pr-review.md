@@ -140,9 +140,10 @@ The verdict contract is unchanged in sweep mode: findings still carry the four s
 1. **Read the PR description.** Understand the stated intent before reading code.
 2. **Read the diff in full.** Don't review by skimming.
 3. **Apply each lens systematically.** Note findings as you go.
-4. **Assign each finding a severity** from the four-value vocabulary in **Severity → Verdict**: `critical`, `warning`, `suggestion`, or `nit`. Do not invent other severity words — the verdict mapping is defined only over these four.
-5. **Post structured comments.** Per-finding inline comments are preferred over a single review essay.
-6. **Resolve to a verdict** using the buckets table in **Severity → Verdict**, and post it with the matching `gh pr review` action. The verdict follows from the findings — it is not a separate judgement call.
+4. **Apply the detector-driven-change probe.** Read the PR's *Detector hits* section (`sops/dev-pipeline.md`), and independently scan the diff for fixture/test text edits with no functional reason. For each one, apply the test from `sops/dev-pipeline.md`'s **Detector-driven changes**: *would we make this change if the detector didn't exist?* "No" — it changed only to quiet the detector — is a finding; request changes. A hit the diff shows evidence of that *Detector hits* omits is itself a finding, independent of whether the underlying change turns out legitimate.
+5. **Assign each finding a severity** from the four-value vocabulary in **Severity → Verdict**: `critical`, `warning`, `suggestion`, or `nit`. Do not invent other severity words — the verdict mapping is defined only over these four.
+6. **Post structured comments.** Per-finding inline comments are preferred over a single review essay.
+7. **Resolve to a verdict** using the buckets table in **Severity → Verdict**, and post it with the matching `gh pr review` action. The verdict follows from the findings — it is not a separate judgement call.
 
 ## Custom Review Skill (optional)
 

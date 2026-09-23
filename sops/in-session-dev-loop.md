@@ -47,6 +47,7 @@ The main session owns this. Don't outsource the diagnosis — outsource the *typ
 
 - Spawn **one fresh-context implementer** in an **isolated worktree** (see [`worktree-discipline.md`](./worktree-discipline.md)). Fresh context keeps the main session's orchestration judgement uncluttered by implementation detail, and gives the work a clean room.
 - The brief carries: the **confirmed diagnosis**, an explicit **"verify before you change"** instruction, the **conventions to match** (don't let it invent a path, name, or shape the rest of the system doesn't already expect — point it at the reader on the other side), the **scoped** test command that proves the fix, and **"push the branch, do not merge, do not open the PR, report back structured."** The main session keeps control of the PR body — that's part of the narrative.
+- The brief also points at `sops/dev-pipeline.md`'s **Detector-driven changes** section: a change made only to quiet a scanner is refused, and every red met gets reported back for the PR's *Detector hits* section.
 - Tell it to **report the non-obvious**: the convention it chose and *where it confirmed the other side reads the same*, anything that turned out bigger than the diagnosis, and the residual risk an adversarial reviewer should focus on.
 
 ## 3. Review with an *independent* sub-agent
