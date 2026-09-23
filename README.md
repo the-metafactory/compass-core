@@ -15,7 +15,7 @@ Six governance surfaces, all wired to one config:
 | **Subagent** | `claude/agents/governance.md` | Autonomous governance task execution from another agent |
 | **CLAUDE.md template** | `templates/CLAUDE.md.template` | Standard rules + label table + SOP activation table |
 | **Validators** | `engine/validators/` | CLAUDE.md sections, GitHub label hygiene, and a leak/credential scanner |
-| **CI gates** | `.githooks/`, `templates/workflows/` | Pre-commit hook + PR workflow, installed with `--with-ci` |
+| **CI gates** | `.githooks/`, `templates/workflows/` | Pre-commit hook + PR governance and pin-bump workflows, installed with `--with-ci` |
 | **SOPs** | `sops/` | Twelve generic SOPs (dev-pipeline, versioning, worktree, design-process, retrospective, new-repo-pattern, pr-review, brainstorming-and-review, autonomous-work, in-session-dev-loop, plan-breakdown, confidentiality-gate) |
 
 ## Install
@@ -39,7 +39,7 @@ That writes two things, and nothing outside the target:
 | `<target>/sops/*.md` | the SOPs, **rendered** — real branch pattern, real manifest, real channel |
 | `<target>/CLAUDE.md` | a `<!-- compass-core:begin -->…<!-- compass-core:end -->` block: critical rules, then the SOP activation table, then your repo-specific values |
 
-With `--with-ci`, two more — see [CI gates](#ci-gates---with-ci).
+With `--with-ci`, four more — see [CI gates](#ci-gates---with-ci).
 
 The rendering is the point. An installed SOP names your actual values, so no
 generated file tells the model to go and read `compass.config.yaml` at run time
@@ -60,7 +60,7 @@ touches nothing.
 bun engine/install.ts /path/to/your-repo --with-ci
 ```
 
-Adds three more files, and changes nothing else — the CLAUDE.md block is a
+Adds four more files, and changes nothing else — the CLAUDE.md block is a
 function of your config alone, identical with or without this flag:
 
 | Path | What |
@@ -68,6 +68,16 @@ function of your config alone, identical with or without this flag:
 | `<target>/.githooks/pre-commit` | local leak/credential scan over staged changes |
 | `<target>/.githooks/leak-check.ts` | the scanner that hook runs |
 | `<target>/.github/workflows/compass-governance.yml` | PR gate: claude-md-check, label-check, leak-check |
+| `<target>/.github/workflows/compass-pin-check.yml` | pin-bump gate: requires the `pin-bump` label on a PR touching a pin-sensitive path |
+
+`compass-pin-check.yml` carries no pin and no other placeholder — it is
+rendered through the same path as `compass-governance.yml` but comes out
+byte-identical to its template
+([#56](https://github.com/the-metafactory/compass-core/issues/56); it was
+split out of `compass-governance.yml` per
+[#41](https://github.com/the-metafactory/compass-core/issues/41)'s round-3
+review, and `--with-ci` initially rendered only the governance file, so a
+re-render silently dropped the pin-bump gate).
 
 The workflow **checks compass-core out for itself**, pinned to an exact commit,
 and runs the validators from that checkout against your files. Your repo carries

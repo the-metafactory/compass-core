@@ -566,6 +566,96 @@ describe("install.ts — --with-ci", () => {
   });
 });
 
+/**
+ * the-metafactory/compass-core#56: `--with-ci` rendered only
+ * compass-governance.yml. templates/workflows/compass-pin-check.yml (split out
+ * of compass-governance.yml per #41's round-3 review, G1) never reached a
+ * consumer's .github/workflows/ at all — a re-render silently dropped the
+ * pin-bump gate. FAILS on main at 78f085b (after #52 and #57): only
+ * compass-governance.yml exists; compass-pin-check.yml is never written.
+ *
+ * compass-pin-check.yml carries no pin and no other placeholder, so it must
+ * come through byte-identical to its template. compass-governance.yml must
+ * match its template apart from the one substituted pin — asserted by
+ * capturing the ACTUAL rendered pin and substituting it back into the
+ * template, rather than hard-coding ENGINE_REF, so this stays correct across
+ * a pin bump.
+ *
+ * PR #66 (open, fixing #55) also touches templates/workflows/
+ * compass-pin-check.yml (a `-z`/NUL-delimited read fix to the same file this
+ * test compares against). This test reads whatever that template currently
+ * is, so it holds regardless of which of #66 or this fix merges first.
+ */
+describe("install.ts — --with-ci renders both workflow templates (#56)", () => {
+  const WORKFLOW = join(".github", "workflows", "compass-governance.yml");
+  const PIN_CHECK = join(".github", "workflows", "compass-pin-check.yml");
+
+  test("both files exist", () => {
+    const dir = target();
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    expect(existsSync(join(dir, WORKFLOW))).toBe(true);
+    expect(existsSync(join(dir, PIN_CHECK))).toBe(true);
+  });
+
+  test("compass-pin-check.yml is byte-identical to its template", () => {
+    const dir = target();
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+    const template = readFileSync(
+      join(REPO, "templates", "workflows", "compass-pin-check.yml"),
+      "utf8",
+    );
+    expect(readFileSync(join(dir, PIN_CHECK), "utf8")).toBe(template);
+  });
+
+  test("compass-governance.yml matches its template apart from the pin substitution", () => {
+    const dir = target();
+    expect(run([dir, "--with-ci"]).exitCode).toBe(EXIT.OK);
+
+    const template = readFileSync(
+      join(REPO, "templates", "workflows", "compass-governance.yml"),
+      "utf8",
+    );
+    const installed = readFileSync(join(dir, WORKFLOW), "utf8");
+
+    const pinMatch = installed.match(/ref: ([0-9a-f]{40})\b/);
+    expect(pinMatch).not.toBeNull();
+    const expected = template.replace(
+      "{{template:compass_core_ref}}",
+      pinMatch![1],
+    );
+    expect(installed).toBe(expected);
+  });
+
+  test("the installer's file listing names the new file", () => {
+    const dir = target();
+    const r = run([dir, "--with-ci"]);
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(r.stdout).toContain(PIN_CHECK);
+  });
+
+  test("re-install with --with-ci is a no-op for compass-pin-check.yml", () => {
+    const dir = target();
+    run([dir, "--with-ci"]);
+    const r = run([dir, "--with-ci"]);
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(r.stdout).not.toContain(`+ ${PIN_CHECK}`);
+  });
+
+  test("refuses a differing existing compass-pin-check.yml unless --force", () => {
+    const dir = target();
+    mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(dir, PIN_CHECK), "# mine\n");
+
+    const r = run([dir, "--with-ci"]);
+    expect(r.exitCode).toBe(EXIT.REFUSED_EXISTING_FILES);
+    expect(r.stderr).toContain("compass-pin-check.yml");
+    expect(readFileSync(join(dir, PIN_CHECK), "utf8")).toBe("# mine\n");
+
+    expect(run([dir, "--with-ci", "--force"]).exitCode).toBe(EXIT.OK);
+    expect(readFileSync(join(dir, PIN_CHECK), "utf8")).not.toBe("# mine\n");
+  });
+});
+
 describe("install.ts — non-clobber", () => {
   test("refuses a differing existing SOP, leaves it untouched, and reports it", () => {
     const dir = target();

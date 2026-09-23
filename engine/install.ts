@@ -16,6 +16,14 @@
  *   <target>/.githooks/pre-commit                        the local leak gate
  *   <target>/.githooks/leak-check.ts                     the scanner it runs
  *   <target>/.github/workflows/compass-governance.yml    the PR gate, rendered
+ *   <target>/.github/workflows/compass-pin-check.yml     the pin-bump gate, copied verbatim
+ *
+ * compass-pin-check.yml carries no pin and no other placeholder (the-metafactory/
+ * compass-core#56) — it still runs through the same render path as
+ * compass-governance.yml (renderText, then the non-clobber/--force/--dry-run
+ * pass below) so a future `{{config:...}}` added to it resolves exactly like
+ * anywhere else, but no placeholder is added here to force that path; today it
+ * is a no-op pass-through and the written bytes equal the template's.
  *
  * Nothing is written outside <target>. standards/ and the governance skill are
  * NOT copied, and neither is engine/ as a tree — the CI workflow checks
@@ -122,6 +130,12 @@ const SOURCE_SOPS = join(PACKAGE_ROOT, "sops");
 const SOURCE_HOOK = join(PACKAGE_ROOT, ".githooks", "pre-commit");
 const SOURCE_SCANNER = join(PACKAGE_ROOT, "engine", "validators", "leak-check.ts");
 const SOURCE_WORKFLOW = join(PACKAGE_ROOT, "templates", "workflows", "compass-governance.yml");
+const SOURCE_PIN_CHECK_WORKFLOW = join(
+  PACKAGE_ROOT,
+  "templates",
+  "workflows",
+  "compass-pin-check.yml",
+);
 
 /**
  * The compass-core commit the generated CI workflow pins its engine checkout to.
@@ -160,7 +174,7 @@ const USAGE = `usage: bun engine/install.ts <target-dir> [--with-ci] [--force] [
   <target-dir>  the repository to install governance into. Must exist and
                 contain a compass.config.yaml.
   --with-ci     also install the pre-commit leak hook and the PR governance
-                workflow. Does not change the CLAUDE.md block.
+                and pin-bump workflows. Does not change the CLAUDE.md block.
   --force       overwrite existing files that differ from the rendered output.
   --dry-run     report what would be written; touch nothing.`;
 
@@ -313,6 +327,27 @@ function main(): void {
       rel: join(".github", "workflows", "compass-governance.yml"),
       contents: renderTemplateValues(workflowResult.text),
     });
+
+    // compass-pin-check.yml — the pin-bump gate. It carries no `{{config:...}}`
+    // and no `{{template:...}}` (it needs no pin: it only reads changed-path
+    // lists at run time), so this render is a no-op today. It still goes
+    // through renderText, not a bare readFileSync, so a future placeholder
+    // added to this file is caught by the same unresolved-placeholder gate as
+    // every other rendered file rather than silently shipping unrendered
+    // (the-metafactory/compass-core#56).
+    const pinCheckSource = readFileSync(SOURCE_PIN_CHECK_WORKFLOW, "utf8");
+    const pinCheckResult = renderText(pinCheckSource, config);
+    for (const key of pinCheckResult.unresolved) {
+      const files = unresolved.get(key) ?? [];
+      files.push("templates/workflows/compass-pin-check.yml");
+      unresolved.set(key, files);
+    }
+    for (const key of pinCheckResult.defaulted) defaulted.add(key);
+    for (const key of pinCheckResult.dropped) dropped.add(key);
+    rendered.push({
+      rel: join(".github", "workflows", "compass-pin-check.yml"),
+      contents: pinCheckResult.text,
+    });
   }
 
   if (unresolved.size > 0) {
@@ -417,6 +452,9 @@ function main(): void {
 
   if (withCi) {
     console.log(`  CI gate: pinned to compass-core ${ENGINE_REF.slice(0, 12)}`);
+    console.log("  pin-bump gate: .github/workflows/compass-pin-check.yml, alongside it —");
+    console.log("                 requires the 'pin-bump' label on a PR that touches a");
+    console.log("                 pin-sensitive path (the-metafactory/compass-core#41).");
     console.log("  local gate: .githooks/pre-commit runs .githooks/leak-check.ts,");
     console.log("              copied in beside it — the hook needs no engine checkout.");
     console.log("");
