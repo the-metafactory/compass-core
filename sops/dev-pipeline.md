@@ -63,6 +63,38 @@ refactor: extract label parsing into shared util
 7. **Merge** — Squash or merge to the default branch. Delete the feature branch. For worktree-based work, follow the full cleanup procedure in [`sops/worktree-discipline.md`](./worktree-discipline.md#cleanup) (remove worktree → delete local branch → delete remote branch → sync primary worktree).
 8. **Version** — Bump `{{config:versioning.manifest}}`, commit, push, create release.
 
+## Detector-driven changes
+
+**The test:** would we make this change if the detector didn't exist?
+
+- **Yes** — the change is legitimate, even though a detector prompted it.
+- **No** — it is evasion, and the change is refused.
+
+A detector hit — a linter, a leak scanner, a CI gate, any automated red — resolves exactly one of three ways:
+
+- (a) **Code changed**, because the detector was right. Name the desired state in one sentence that does not mention the detector, its rule, or passing: "fixtures use only synthetic names", not "reworded to clear the scrub". If the edit changes only whether the detector matches (fixture or test text, a renamed identifier, a restructured line with the same behaviour), (a) is not available. Resolve it as (b) or (c).
+- (b) **Detector corrected**, because it was wrong. Either fix its pattern, with a test that watches it fail on the false positive first, or use its sanctioned exemption with a reason: e.g. `gate:allow <reason>`, the leak-check allow marker (#31), or the private-corpus scrub's reviewed-benign list (#32).
+- (c) **Left open**, filed as an issue.
+
+**Rewording until it passes is not a resolution.** Rewriting a fixture, renaming a variable, or restructuring a test line so a scanner stops matching — with no change to the desired state — is evasion under the test above, whichever of the three resolutions it's dressed up as. It gets refused in review (`sops/pr-review.md`) whether or not the author meant it that way.
+
+## PR Body
+
+If the repo has a PR template, it carries these sections. Otherwise this list is the source.
+
+Every PR body includes:
+
+- **Summary** — what changed and why.
+- **Test plan** — how it was verified: commands run, gates passed.
+- **Detector hits** — every red a detector produced during the work, each listed with its resolution letter (a/b/c) from **Detector-driven changes** above. `None` is a valid entry when nothing fired. A hit the diff shows evidence of that this section omits is itself a review finding (`sops/pr-review.md`).
+
+Example entry:
+
+```
+## Detector hits
+- leak-check `credential-assignment` on `token: someObject.token` — (b) detector corrected: false positive on a code expression, not a literal (#31)
+```
+
 ## Rules
 
 - PRs require at least one review (human or agent) before merge.

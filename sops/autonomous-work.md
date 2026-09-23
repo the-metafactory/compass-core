@@ -28,7 +28,7 @@ If you cannot name what is held, re-read the principal's instruction before star
 Ground truth → build → review → gate → merge → report → sync → next.
 
 1. **Scope from ground truth.** Pick the next **unblocked** slice from the task list / ready queue / issue dependency order. Never work blocked slices or invent slices not in the plan. "Do the rest" means finish the named scope, not expand it.
-2. **Build in isolation.** Spawn a **worktree-isolated** sub-agent per slice (see [`worktree-discipline.md`](./worktree-discipline.md)). Tests first; the branch must come back gate-clean. Parallel agents must touch **non-overlapping files**.
+2. **Build in isolation.** Spawn a **worktree-isolated** sub-agent per slice (see [`worktree-discipline.md`](./worktree-discipline.md)). Tests first; the branch must come back gate-clean. Parallel agents must touch **non-overlapping files**. The brief points at `sops/dev-pipeline.md`'s **Detector-driven changes** section: a change made only to quiet a scanner is refused, and every red met gets reported back for the PR's *Detector hits* section.
 3. **Review proportional to risk.**
    - **Every slice:** the project's review procedure — see [`pr-review.md`](./pr-review.md). If your project ships a review skill or automation, use it rather than reviewing by hand.
    - **Trust-path / security-sensitive code** (auth, signing, crypto, key material, boot/verify gates, anything that fails *open* if wrong): **additionally** run an **independent adversarial review** — a second agent prompted to *refute and break* the change, defaulting to "refuted" when uncertain. Treat blockers **FIX-FIRST**: fix before merge, never "merge then follow up".
