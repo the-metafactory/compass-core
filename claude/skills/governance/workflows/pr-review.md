@@ -28,8 +28,8 @@ SOP: pr-review | PR: {owner/repo}#{N} | Workflow: {Standard/Security/Full}
 | **Compliance** | CLAUDE.md present + valid, arc-manifest.yaml correct, labels per `compass.config.yaml`, conventional commits |
 | **Performance** | N+1 queries, unbounded loops, missing pagination, blocking calls in async |
 
-7. **Apply the detector-driven-change probe** from `sops/pr-review.md` § Review Procedure — for each *Detector hits* entry, compare the diff to the finding and check `git log -p` over the changed fixture/test files for a rewrite with no behaviour change.
-8. **Categorize each finding** as Blocker / Should-fix / Nit.
+7. **Apply the detector-driven-change probe** from `sops/pr-review.md` § Review Procedure — for each *Detector hits* entry, compare the diff to the finding and check `git log -p` over the changed fixture/test files for a rewrite with no behaviour change. Where the issue states a threat model, apply `sops/pr-review.md` § Severity → Verdict § 4 to every finding, not only detector hits — a Compliance blocker below and the confidentiality carve-out are never reclassified by it.
+8. **Categorize each finding** as Blocker / Should-fix / Nit / Known limits, for an issue (`info` — a finding `sops/pr-review.md` § Severity → Verdict § 4 places outside the issue's stated threat model).
 9. **Post structured comments.** Per-finding inline comments are preferred over a single review essay.
 10. **Submit the review** with the appropriate action: approve / request-changes / comment.
 
@@ -43,6 +43,8 @@ Blockers:
 Should-fix:
   1. {finding} — {file:line}
 Nits:
+  1. {finding} — {file:line}
+Known limits, for an issue:
   1. {finding} — {file:line}
 
 Recommendation: {approve / request changes / comment}

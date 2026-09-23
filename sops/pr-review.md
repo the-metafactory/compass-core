@@ -43,7 +43,7 @@ gh pr view {N} --json mergeStateStatus --jq '.mergeStateStatus'
 | **SecurityReview** | Explicit security-only focus. Code quality + OWASP-oriented security analysis. Use when the PR touches auth, input validation, secrets handling, or dependencies. |
 | **StandardReview** | Lightweight. Code quality + auto-detected lenses. Use only for trivial PRs (typo fixes, doc-only changes, dependency bumps). |
 | **HardeningReview** | Defensive/adversarial pass for security-sensitive or trust-path code — abuse cases, input validation, failure modes beyond the OWASP surface. |
-| **SweepReview** | Fix-or-justify sweep (`--fix` mode). Resolves each finding in place or records an explicit justification. See the **Sweep / --fix mode** section below. |
+| **SweepReview** | Fix-or-justify sweep (`--fix` mode). Resolves each bucketed finding in place or records an explicit justification. See the **Sweep / --fix mode** section below. |
 
 ---
 
@@ -93,7 +93,7 @@ Apply these lenses based on workflow and diff content:
 
 ### 1. Severity vocabulary → finding buckets
 
-Every finding carries one of four severities. Each maps to exactly one bucket:
+Every **bucketed** finding carries one of four severities, each mapping to exactly one bucket. `info` (§ 4) is not one of the four: it sits outside this table and never affects the verdict.
 
 | Severity | Bucket |
 |----------|--------|
@@ -108,7 +108,7 @@ Every finding carries one of four severities. Each maps to exactly one bucket:
 |-----------|---------|
 | `blockers > 0` **OR** `majors > 0` | `changes-requested` |
 | only nits (`blockers == 0` **AND** `majors == 0` **AND** `nits > 0`) | `commented` |
-| zero findings | `approved` |
+| zero bucketed findings (none, or `info` only) | `approved` |
 
 **Canonical verdict tokens.** `changes-requested`, `commented`, and `approved` are the canonical verdict tokens — mapping to the `gh pr review --request-changes` / `--comment` / `--approve` actions respectively. This SOP is the single normative source for these tokens; any review tooling a project ships must conform to them rather than inventing its own spelling.
 
@@ -123,13 +123,23 @@ A **confidentiality `critical`** finding is a hard block: it forces `changes-req
 
 No reviewer — human or agent — may resolve a confidentiality critical any other way.
 
+### 4. Findings outside the stated threat model (A2)
+
+This applies only where the issue states a threat model under `sops/dev-pipeline.md` § Threat model in the issue — a detector, guard, check, or trust-path change (A1's scope). On every other PR, § 1 and § 2 above apply unchanged; there is no threat model for an ordinary feature PR's findings to be judged reachable under.
+
+Where a threat model is stated: a finding is assigned its normal severity and bucket if it is (1) reachable under that model, (2) a regression of behaviour that worked before this PR, or (3) a claim the PR body, docs, or code comments make that the code does not actually do. A finding that is none of these — real, but outside the stated model — is recorded as `info`, listed in a *Known limits, for an issue* section **in the review comment itself**, instead of `critical` / `warning` / `suggestion` / `nit`: it carries no bucket and does not enter the § 2 verdict computation, and the PR can merge. Before merge, the orchestrator files one issue listing every `info` finding from that section — "for an issue" is a commitment, not just the section's name.
+
+**Two things this never reclassifies.** The § 3 confidentiality carve-out is untouched — a confidentiality `critical` is a leak in the PR's own content, not a claim about the threat model of the thing under test, and stays non-waivable regardless of what the issue scoped. Nor is a Compliance blocker from the governance workflow's Failure Modes (`claude/skills/governance/workflows/pr-review.md`: "CLAUDE.md / arc-manifest.yaml validation fails on the PR branch: Add a Compliance blocker; do not approve") — that is a repo-hygiene gate, not a threat-model question. Both keep their existing severity and block exactly as before this rule.
+
+**Worked example.** #34's round 3 (H1, a NUL-byte binary exemption) and round 4 (J1, a phantom `+++` file header) were deliberate-evasion constructions that #32 — the issue behind #34 — never scoped as in or out of bounds; under this rule they would be recorded as `info` rather than blocking. #48's round 3 correctly blocked, in the review's Blocking section under criteria 1, 2, and 3 together, a widening that excused real hyphenated passphrases, because accidental leaks — not only deliberate evasion — were squarely in `leak-check`'s stated model (#42 F1).
+
 ---
 
 ## Sweep / --fix mode
 
-Review can run in **sweep (`--fix`) mode**: instead of only reporting findings, the reviewer resolves each one under a **fix-or-justify** contract — every finding is either fixed in place or given an explicit written justification for why it stands. This is the mode an autonomous work loop invokes per slice, rather than handing a report back to a human.
+Review can run in **sweep (`--fix`) mode**: instead of only reporting findings, the reviewer resolves each one under a **fix-or-justify** contract — every bucketed finding (§ 1) is either fixed in place or given an explicit written justification for why it stands. This is the mode an autonomous work loop invokes per slice, rather than handing a report back to a human.
 
-The verdict contract is unchanged in sweep mode: findings still carry the four severities above, and the sweep is complete only when every finding is either fixed or carries a recorded justification.
+The verdict contract is unchanged in sweep mode: findings still carry the four severities above, plus `info` (§ 4), which needs neither a fix nor a justification — it's listed in the sweep's *Known limits, for an issue* record and does not count toward the sweep's verdict. The sweep is complete only when every other finding is either fixed or carries a recorded justification.
 
 **Sweep mode respects the confidentiality carve-out.** A confidentiality `critical` (see the **Severity → Verdict** section) is **not** a "justify" candidate — it is never waivable, so in sweep mode it closes only by removing the content or linking an approval URL, exactly as in report mode. Every other finding may be fixed in place or justified.
 
@@ -140,8 +150,8 @@ The verdict contract is unchanged in sweep mode: findings still carry the four s
 1. **Read the PR description.** Understand the stated intent before reading code.
 2. **Read the diff in full.** Don't review by skimming.
 3. **Apply each lens systematically.** Note findings as you go.
-4. **Apply the detector-driven-change probe.** For each *Detector hits* entry (`sops/dev-pipeline.md` § PR Body), open the flagged location and compare that file's diff with the detector's own finding: the diff should touch the flagged line and do what the resolution says. Then run `git log -p origin/<default-branch>..HEAD` over the changed fixture and test files. Text rewritten with no behaviour change, or rewritten more than once, is a detector hit and needs an entry. For each hit, ask whether the same change would appear in a PR where the detector didn't exist. If not, it is a `warning`. A hit with no entry is a `warning`.
-5. **Assign each finding a severity** from the four-value vocabulary in **Severity → Verdict**: `critical`, `warning`, `suggestion`, or `nit`. Do not invent other severity words — the verdict mapping is defined only over these four.
+4. **Apply the detector-driven-change probe.** For each *Detector hits* entry (`sops/dev-pipeline.md` § PR Body), open the flagged location and compare that file's diff with the detector's own finding: the diff should touch the flagged line and do what the resolution says. Then run `git log -p origin/<default-branch>..HEAD` over the changed fixture and test files. Text rewritten with no behaviour change, or rewritten more than once, is a detector hit and needs an entry. For each hit, ask whether the same change would appear in a PR where the detector didn't exist. If not, it is a `warning`. A hit with no entry is a `warning`. Where the issue states a threat model, apply **Severity → Verdict § 4** to every finding, not only detector hits.
+5. **Assign each finding a severity** from the four-value vocabulary in **Severity → Verdict**: `critical`, `warning`, `suggestion`, or `nit` — plus `info` for a finding **Severity → Verdict § 4** places outside the issue's stated threat model. Do not invent other severity words beyond these five; the § 2 verdict mapping is defined only over the original four.
 6. **Post structured comments.** Per-finding inline comments are preferred over a single review essay.
 7. **Resolve to a verdict** using the buckets table in **Severity → Verdict**, and post it with the matching `gh pr review` action. The verdict follows from the findings — it is not a separate judgement call.
 
