@@ -1240,3 +1240,124 @@ describe("leak-check.ts — #42 review: U+2060 and U+00AD are also stripped", ()
     expect(r.exitCode).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #46 — `credential-assignment`'s key alternation required the key
+// word to be followed directly (mod whitespace) by `:`/`=`. A QUOTED key —
+// the shape every JSON file, cloud service-account file, package.json-style
+// config, and JS/TS object with quoted keys actually uses — has a closing
+// quote sitting between the key and the separator, so the rule never even
+// produced a candidate match there: `{"token": "<secret>"}` gave zero
+// findings. Fix: a new leading alternative matching a whole quoted key —
+// `"KEY"` or `'KEY'`, literal matching quote pair, no backreference (so the
+// existing value capture groups m[1]..m[4] stay unshifted) — alongside the
+// existing unquoted, boundary-based alternatives. See CRED_KEY_QUOTED in
+// leak-check.ts.
+//
+// Every fixture below is built at RUNTIME via the quotedKV helper, never as
+// `"token": "<value>"` contiguous literal text in this file's own source —
+// this file is itself scanned by leak-check, and (per this issue's own fix)
+// a literal quoted-key shape in source is now a real finding, not a
+// synthetic one. Credential-shaped key words are additionally split across
+// string-literal fragments ("to" + "ken"), matching this file's existing
+// convention, so no keyword is ever contiguous in source either.
+//
+// "[watched]" tests were confirmed to give 0 findings against origin/main
+// (4a69f59) — see the PR body for the captured output — and are BLOCKED
+// after the fix.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds `"key": "value"` (or `'key': 'value'`) without the shape ever
+ * appearing as contiguous literal text in this file's source — see the note
+ * above.
+ */
+function quotedKV(key: string, value: string, quote: '"' | "'" = '"'): string {
+  return quote + key + quote + ":" + " " + quote + value + quote;
+}
+
+describe("leak-check.ts — issue #46: quoted credential keys", () => {
+  test('[watched] {"token": "<40>"} in a .json file is flagged', () => {
+    const key = "to" + "ken";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-1.json:1: credential-assignment");
+    expect(r.output).not.toContain(FAKE.envValue);
+  });
+
+  test('[watched] {"api_key": "<40>"} in a .json file is flagged', () => {
+    const key = "api" + "_key";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-2.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-2.json:1: credential-assignment");
+  });
+
+  test("[watched] {'secret': '<40>'} in a .ts file is flagged", () => {
+    const key = "sec" + "ret";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-3.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-3.ts:1: credential-assignment");
+  });
+
+  test("[watched] a nested service-account-shaped object with a quoted key is flagged", () => {
+    const key = "cli" + "ent_secret";
+    const line3 = "  " + quotedKV(key, FAKE.envValue) + ",\n";
+    const content = "{\n" + '  "type": "service_account",\n' + line3 + "}\n";
+    const f = write("f46-4.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-4.json:3: credential-assignment");
+  });
+
+  // Regression guards: the new quoted-key alternative must keep the same
+  // last-segment / placeholder / quote-pairing discipline as the unquoted
+  // branches, not become a looser match.
+  test('a quoted "tokenizer" key is not flagged (last-segment rule holds for quoted keys too)', () => {
+    const key = "token" + "izer";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-5.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted key with a placeholder value ("changeme") is still not flagged', () => {
+    const key = "to" + "ken";
+    const content = "{" + quotedKV(key, "change" + "me") + "}\n";
+    const f = write("f46-6.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("mismatched quote types around the key do not pair up (no match)", () => {
+    const key = "to" + "ken";
+    const dq = '"';
+    const sq = "'";
+    const content = "{" + dq + key + sq + ": " + dq + FAKE.envValue + dq + "}\n";
+    const f = write("f46-7.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a quoted key with an unquoted, code-expression-shaped value in .json still blocks (JSON has no code — no exemption)", () => {
+    // Answers the issue's last box directly: a JSON *value* is always a
+    // string/number/bool/null/object/array — never a code expression — so
+    // there is nothing to exempt. isCodeFile's extension list already
+    // excludes .json; this pins that an unquoted, member-expression-shaped
+    // value after a quoted JSON key is never accidentally given the .ts
+    // code-expression carve-out.
+    const key = "to" + "ken";
+    const dq = '"';
+    const value = "zeroReports" + "." + "token"; // shaped like the .ts code-expression carve-out
+    const content = "{" + dq + key + dq + ": " + value + "}\n";
+    const f = write("f46-8.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-8.json:1: credential-assignment");
+  });
+});

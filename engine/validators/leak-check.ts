@@ -287,6 +287,40 @@
  * anything else touches that text — see the call sites in the main scan
  * loop and in `reasonContainsFinding`.
  *
+ * QUOTED KEYS (issue #46): `credential-assignment`'s key alternation used to
+ * require the key word to sit directly (mod whitespace) before `:`/`=`. A
+ * quoted key — `"token": "…"`, the shape of every JSON file, cloud
+ * service-account file, `package.json`-style config, and JS/TS object with
+ * quoted keys — has a closing quote in between, so the rule never fired
+ * there at all; this was probably the biggest miss of anything #37/#42
+ * fixed. Fixed with a new leading alternative, CRED_KEY_QUOTED, matching a
+ * whole `"KEY"` or `'KEY'` pair (see its own comment for why it's two
+ * literal alternatives and not a backreference). No other rule needed a
+ * quoted-key path: the dedicated shape rules (`jwt`, `sendgrid-api-key`,
+ * etc.) never depended on a key name in the first place, and the denylist
+ * is a plain substring match regardless of surrounding syntax.
+ *
+ * JSON VALUES NEVER GET THE CODE-EXPRESSION CARVE-OUT, AND THAT IS CORRECT,
+ * NOT AN OVERSIGHT (issue #46's last box): the code-expression exemption in
+ * `accept` (see CODE EXPRESSIONS ARE NOT CREDENTIALS above) only applies
+ * when `isCodeFile` or `isMarkdown && closesInlineCode` is true, and
+ * `isCodeFile`'s extension list (`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`)
+ * has never included `.json` — an unquoted, member-expression-shaped value
+ * in a `.json` file already fell through to `return true` (flagged)
+ * unconditionally, before and after this issue's fix. That is the right
+ * behaviour, not an accident worth widening: valid JSON has exactly six
+ * value kinds — string, number, boolean, null, object, array — and NONE of
+ * them is a code expression. `token: zeroReports.token` reads as a call/
+ * member-access chain only because JS/TS syntax makes an unquoted bareword
+ * a variable reference; the identical bytes in a `.json` file are either a
+ * syntax error (if genuinely unquoted) or, quoted, an ordinary string whose
+ * content happens to contain dots — never evaluated, never a reference to
+ * anything. A "JS/TS code expression exemption for JSON" would just be a
+ * new way to launder a real secret past the scanner by wrapping the file in
+ * `.json`, for a carve-out whose entire justification (the domain-word
+ * false positive from issue #31 — `token: zeroReports.token` meaning "the
+ * `.token` property of `zeroReports`") cannot occur in JSON at all.
+ *
  * Exit codes: 0 = clean, 1 = findings, 2 = usage/configuration error.
  */
 
@@ -362,6 +396,36 @@ const CRED_KEY_ANY = `(?:${CRED_KEYS.map(ci).join("|")})`;
 const CRED_KEY_UPPER_FIRST = `(?:${CRED_KEYS.map((k) => k[0]!.toUpperCase() + ci(k.slice(1))).join("|")})`;
 
 /**
+ * A QUOTED key — issue #46: `credential-assignment`'s key alternation above
+ * requires the key word to be followed directly (mod whitespace) by `:`/`=`,
+ * which is exactly what a JSON file, a cloud service-account file, a
+ * `package.json`-style config, or a JS/TS object with quoted keys never
+ * gives it — a closing quote sits between the key and the separator
+ * (`"token": "…"`), so the rule never produced a candidate match there at
+ * all. `{"token": "<secret>"}` gave zero findings on main.
+ *
+ * Fixed as two literal, fully-enumerated alternatives — `"KEY"` and `'KEY'`
+ * — rather than a backreference-captured quote character. That choice is
+ * deliberate on two counts:
+ *   1. It adds no new capturing group, so the value alternation's existing
+ *      `m[1]`..`m[4]` indices (used throughout `accept`) stay unshifted.
+ *   2. Because there is no `.*` between the quotes, CRED_KEY_ANY must match
+ *      the ENTIRE quoted content end-to-end — the same last-segment
+ *      discipline the unquoted branches enforce via lookbehind/lookahead
+ *      falls out for free here: `"tokenizer"` and `"pretoken"` still don't
+ *      match, since neither equals a CRED_KEYS alternative exactly.
+ *
+ * Deliberately NOT extended to the CRED_KEY_UPPER_FIRST (camelCase-prefix)
+ * shape inside quotes — `"fooSecret"` with an arbitrary prefix before the
+ * opening quote is not what this issue asks for, and the compound
+ * credential words already in CRED_KEYS (`api[_-]?key`, `client[_-]?secret`,
+ * `auth[_-]?token`) already match a quoted camelCase compound like
+ * `"authToken"` or `"clientSecret"` on their own, because CRED_KEY_ANY is
+ * case-insensitive letter by letter, not just at the first letter.
+ */
+const CRED_KEY_QUOTED = `(?:"${CRED_KEY_ANY}"|'${CRED_KEY_ANY}')`;
+
+/**
  * Built-in ruleset — deliberately small and shape-based. These are the leaks that
  * are wrong in *any* repository; anything organisation-specific belongs in the
  * operator pattern file, never here (this file is public).
@@ -427,9 +491,10 @@ const RULES: Rule[] = [
     // No `/i` flag — the boundary rule depends on real (not case-folded)
     // case, so case-insensitivity is baked into CRED_KEY_ANY /
     // CRED_KEY_UPPER_FIRST letter by letter instead. See CREDENTIAL KEY
-    // NAMES in the file header and #42's F2.
+    // NAMES in the file header and #42's F2. The quoted-key alternative
+    // (CRED_KEY_QUOTED, issue #46) comes first — see its own comment above.
     re: new RegExp(
-      `(?:(?<![A-Za-z0-9])${CRED_KEY_ANY}|(?<=[a-z])${CRED_KEY_UPPER_FIRST})(?![A-Za-z0-9_])\\s*[:=]\\s*` +
+      `(?:${CRED_KEY_QUOTED}|(?<![A-Za-z0-9])${CRED_KEY_ANY}|(?<=[a-z])${CRED_KEY_UPPER_FIRST})(?![A-Za-z0-9_])\\s*[:=]\\s*` +
         `(?:"([^"\\n]*)"|'([^'\\n]*)'|\`([^\`\\n]*)\`|(${UNQUOTED_CHAR}+))`,
     ),
     accept: (m, ctx) => {
