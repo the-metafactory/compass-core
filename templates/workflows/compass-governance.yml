@@ -29,25 +29,34 @@
 # A PR CANNOT CHANGE THE WORKFLOW OR THE PIN THAT GATES IT
 # ----------------------------------------------------------
 # (the-metafactory/compass-core#41). This job runs on `pull_request_target`,
-# not `pull_request`: GitHub resolves a pull_request_target-triggered
-# workflow, and every value inside it — including the `ref:` on the
-# compass-core checkout below — from the file as it exists on the BASE
-# branch, never the PR head's own copy. A PR editing its own copy of this
-# file, including repointing the pin to an older, weaker engine, has zero
-# effect on the run that gates it. Two things follow from that, and both are
-# applied below — see GitHub's own hardening guidance for pull_request_target
+# not `pull_request`: `pull_request_target` resolves ENTIRELY from the file as
+# it exists on the repository's DEFAULT branch — not "the PR's base branch" in
+# general (GitHub: "this event will only trigger a workflow run if the
+# workflow file exists on the default branch"; `GITHUB_SHA` for this event is
+# "the last commit on the default branch") — so every value inside it,
+# including the `ref:` on the compass-core checkout below, comes from the
+# repo's default branch, never the PR head's own copy, and never some other
+# branch a PR happens to target. A PR editing its own copy of this file,
+# including repointing the pin to an older, weaker engine, has zero effect on
+# the run that gates it. Two things follow from that, and both are applied
+# below — see GitHub's own hardening guidance for pull_request_target
 # ("Keeping your GitHub Actions and workflows secure: Preventing pull_request_target
 # workflows from accessing secrets and writing to the repository"):
 #
 #   1. This job NEVER checks out `github.event.pull_request.head.sha` (the PR
 #      author's own commits) into the default working directory, and NEVER
-#      executes anything from it. The one step that touches the PR head at
-#      all (leak-check, which has to look at the PR's OWN changed files to
-#      scan them) checks it out to an isolated `pr-head/` directory with
-#      `persist-credentials: false`, and every validator reads paths under
-#      that directory as TEXT — `bun <engine path> pr-head/<file>` — never as
-#      something invoked, sourced, `bun install`'d, or given a hook to run.
-#      Read the file; never run the file.
+#      executes anything from it. Two steps read from the PR head at all
+#      (claude-md-check, which validates the PR's OWN proposed CLAUDE.md, and
+#      leak-check, which scans the PR's OWN changed files) — both check it out
+#      to an isolated `pr-head/` directory with `persist-credentials: false`,
+#      and read paths under it as TEXT — `bun <engine path> pr-head/<file>` —
+#      never as something invoked, sourced, `bun install`'d, or given a hook
+#      to run. label-check reads no PR file at all: it only queries the
+#      GitHub API for the repo's current labels. Read the file; never run the
+#      file. A symlink under `pr-head/` is refused outright, before any
+#      validator runs (see that step) — `[ -f ]` and a bare filename argument
+#      both follow a symlink, and a PR-planted one pointing outside `pr-head/`
+#      would otherwise get its TARGET's content into a scan.
 #   2. `permissions:` is the minimum this job needs — `contents: read` to
 #      check things out, `issues: read` because label-check lists the repo's
 #      labels. Nothing here writes to the repository, comments on the PR, or
@@ -55,30 +64,46 @@
 #      privileged enough that an unused scope left in is a real difference,
 #      not a formality.
 #
-# A CONSEQUENCE WORTH SAYING OUT LOUD: under `pull_request`, a fork PR never
-# saw `secrets.CONFIDENTIALITY_DENYLIST` or a token with any real reach — the
-# leak-check step below used to comment on that ("Secrets are not exposed to
-# fork PRs"). That is no longer true. `pull_request_target` hands this job
-# the SAME secrets and the SAME token for a fork PR as for a same-repo one —
-# that is the whole point of the event (the base branch's code and secrets,
-# regardless of who opened the PR) and also exactly why rule 1 above is not
-# optional: with every PR now getting real secrets, "never run PR code with
-# them" is the entire safety margin.
+# A CONSEQUENCE WORTH SAYING OUT LOUD, AND WHERE IT STOPS: under
+# `pull_request`, a fork PR never saw a token with any real reach.
+# `pull_request_target` hands every PR — fork or not — the same GITHUB_TOKEN,
+# scoped by `permissions:` above. That much is unavoidable and is the whole
+# point of the event. It does NOT mean a fork PR gets the confidentiality
+# denylist: `secrets.CONFIDENTIALITY_DENYLIST` is withheld from a fork PR
+# (see the leak-check step's `env:`), same as it always was under
+# `pull_request` — a public repo's Actions logs are public too, and
+# leak-check's own output (`file:line: rule-name`) would otherwise let any
+# GitHub user run this job on a fork PR as a one-guess-per-line oracle against
+# a confidential term list. sops/confidentiality-gate.md §5's "run the local
+# gate before merging a fork PR" MUST still holds, unchanged, for exactly that
+# reason.
 #
 # A SEPARATE CHECK REFUSES AN UNLABELLED PIN CHANGE (compass-core#41, ruling
 # item 2). pull_request_target already stops a PR from being gated by its OWN
 # chosen pin — but a maintainer can still merge a PR that changes the pin
 # (deliberately or by reviewing past it), and that pin then governs EVERY
-# subsequent PR. `pin-check`, the second job below, refuses any PR that edits
-# the `ref:` on the compass-core checkout unless it carries the `pin-bump`
-# label — a functional label (not one of this repo's type/priority labels),
-# created once with `gh label create pin-bump ...`. A labelled, pin-changing
-# PR is not auto-merged by anything here: the label signals "this needs a
-# human to read the diff and admin-merge it," same as any other pin bump.
-# pin-check re-implements the small extraction-and-compare in shell rather
-# than calling the pin-check module (validators/pin-check.ts, under engine/)
-# from .compass-engine — see that file's own header for why (a pin cannot
-# point at a commit that doesn't exist on main yet, and the module is new).
+# subsequent PR. `pin-check`, the second job below, refuses any PR whose diff
+# touches `.github/workflows/compass-governance.yml`,
+# `templates/workflows/compass-governance.yml` or `engine/install.ts` unless
+# it carries the `pin-bump` label — a functional label (not one of this
+# repo's type/priority labels), created once with
+# `gh label create pin-bump ...`. This is deliberately PATH-based, not a
+# comparison of the pin's VALUE: an earlier value-comparison cut (PR #52
+# review, F1) was defeated by any edit that left the anchored `ref:`/
+# `ENGINE_REF` line alone while changing what actually took effect — a decoy
+# comment, a second checkout step, a `git checkout` spliced into a `run:`
+# line, a second constant that shadows the real one, or deleting the
+# `pin-check` job outright while leaving the ref line untouched (which a
+# value comparison has no way to even notice, since nothing about "a job
+# exists" is a value it reads). Touching the FILE AT ALL is what's checked
+# now, and there is no way to edit inside a file without touching the file.
+# A labelled, pin-changing PR is not auto-merged by anything here: the label
+# signals "this needs a human to read the diff and admin-merge it," same as
+# any other pin bump. pin-check re-implements the small
+# diff-and-path-membership check in shell rather than calling the pin-check
+# module (validators/pin-check.ts, under engine/) from .compass-engine — see
+# that file's own header for why (a pin cannot point at a commit that
+# doesn't exist on main yet, and the module is new).
 #
 # CONFIDENTIALITY_DENYLIST_FILE — READ THIS BEFORE WIRING THE SECRET
 # -------------------------------------------------------------------
@@ -110,6 +135,11 @@
 #
 # Arm the local hook once per clone:  git config core.hooksPath .githooks
 #
+# Secrets are not exposed to fork PRs, so a fork run is always built-ins-only —
+# see sops/confidentiality-gate.md §5 for the local-gate step a maintainer owes
+# a fork PR before merging. That is also why --require-patterns is applied only
+# when a denylist is actually available: a fork PR must run reduced, not fail.
+#
 # Actions and the engine checkout are pinned by commit SHA, not tag. A tag is
 # mutable; a security gate that a consumer copies should not be re-pointable by
 # whoever can move it.
@@ -118,6 +148,13 @@ name: compass governance
 
 on:
   pull_request_target:
+    # `labeled`/`unlabeled` added deliberately (PR #52 review, F3): without
+    # them, this event defaults to [opened, synchronize, reopened], so
+    # `gh pr edit --add-label pin-bump` after the fact triggers NO new run at
+    # all — not even one that re-reads a stale payload, none. pin-check's own
+    # error message tells the author to add the label; that instruction is
+    # only true because these two types are here to make it re-run.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -125,25 +162,31 @@ permissions:
 
 jobs:
   governance:
+    # A pure label add/remove never changes any file — only pin-check needs
+    # to react to it. Skipping the heavier job on those two event actions is
+    # an optimisation, not a correctness requirement: governance would
+    # produce the same result either way, just more slowly and more often.
+    if: github.event.action != 'labeled' && github.event.action != 'unlabeled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: read
     steps:
-      # Checked out for GIT PLUMBING ONLY — computing the PR's changed-file
-      # list needs both commits' objects in one authenticated clone (private
-      # repos need the token for that fetch; persist-credentials: false on
-      # pr-head below deliberately removes it there). No validator reads a
-      # FILE out of this directory; every validator reads from pr-head/. This
-      # is not "the workflow's own trust anchor" in any special sense —
-      # GitHub already sources the workflow FILE (trigger, pin, every step)
-      # from the base branch via the pull_request_target event itself, not
-      # from this checkout.
-      - name: Check out the base branch (git history only, for the diff below)
+      # GIT PLUMBING ONLY — computing the PR's changed-file list needs both
+      # commits' objects in one clone. persist-credentials: false, same as
+      # every other checkout here; the one command that needs to authenticate
+      # (the fetch below, for a private repo) supplies the token itself, for
+      # that command only, rather than leaving it sitting in base/.git/config
+      # for the rest of the job (PR #52 review, F10) — see the leak-check
+      # step for why that specific detail matters (a symlink planted under
+      # pr-head/ must never be able to read a persisted credential out of
+      # this checkout).
+      - name: Check out the default branch (git history only, for the diff below)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: base
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check out the PR head as DATA ONLY (never executed)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -151,6 +194,19 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: pr-head
           persist-credentials: false
+
+      - name: Refuse symlinks under pr-head/ (data must be data)
+        # Before any validator reads a byte from pr-head/: a symlink there,
+        # planted by the PR, resolves to whatever it points at — including
+        # outside pr-head/ entirely — and every read below (`[ -f ]`, a bare
+        # filename argument to leak-check) follows it. PR #52 review, F10.
+        run: |
+          set -euo pipefail
+          if find pr-head -type l -print -quit | grep -q .; then
+            echo "::error::pr-head/ contains a symlink — refusing to scan it. A symlink under the PR-head checkout can point outside pr-head/ (another checkout's files, a runner temp file); this workflow only ever reads pr-head/ as plain file data, never resolving a link."
+            find pr-head -type l -print | sed 's/^/::error::symlink: /'
+            exit 1
+          fi
 
       - name: Check out the compass-core engine
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -167,49 +223,70 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: claude-md-check
-        # Reads the PR's OWN proposed CLAUDE.md and compass.config.yaml — data
-        # under pr-head/, opened and parsed by the pinned engine, never run.
+        # The FILE is the PR's own proposed CLAUDE.md (pr-head/) — that's the
+        # point, checking what the PR proposes. The CONFIG is base/'s, not
+        # pr-head/'s (PR #52 review, F5): required_sections lives in
+        # compass.config.yaml, and reading that from pr-head/ would let a PR
+        # turn off its own CLAUDE.md requirements in the same diff that
+        # violates them.
         run: |
           bun .compass-engine/engine/validators/claude-md-check.ts pr-head/CLAUDE.md \
-            --config pr-head/compass.config.yaml
+            --config base/compass.config.yaml
 
       - name: label-check
+        # Reads no PR file at all — repo labels come from the GitHub API, and
+        # (PR #52 review, F5) the required-label list comes from base/'s
+        # compass.config.yaml, not the PR's own, for the same reason as
+        # claude-md-check above: validators.label_check.enforce_required is a
+        # gate a PR must not be able to switch off on itself.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bun .compass-engine/engine/validators/label-check.ts "${{ github.repository }}" \
-            --config pr-head/compass.config.yaml
+            --config base/compass.config.yaml
 
       - name: leak-check (changed files)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          DENYLIST: ${{ secrets.CONFIDENTIALITY_DENYLIST }}
+          GH_TOKEN: ${{ github.token }}
+          # Andreas ruled (2026-09-24, PR #52 review F4): withhold the
+          # denylist from a fork PR. This repo is public, so its Actions logs
+          # are public; leak-check prints `file:line: denylist[i]` per hit,
+          # which would otherwise let ANY GitHub user open a fork PR with one
+          # guessed term per line and read back, line by line, which guesses
+          # are on the confidential list — a fork PR never gets code executed
+          # here (nothing from pr-head/ runs), so that oracle is the actual
+          # residual risk pull_request_target introduces, and this is where
+          # it's closed. Gated in `env:`, not inside the script below, so
+          # there's no script-level branch to bypass: a fork run's DENYLIST
+          # is the empty string before leak-check.ts ever starts.
+          DENYLIST: ${{ github.event.pull_request.head.repo.full_name == github.repository && secrets.CONFIDENTIALITY_DENYLIST || '' }}
         run: |
           set -euo pipefail
 
-          # --require-patterns only when a denylist is actually reachable.
-          # Every PR gets this job's real secrets now (pull_request_target,
-          # see the file header) — the old "fork PRs run reduced" distinction
-          # no longer applies; this branch only handles the org simply not
-          # having wired the secret up yet.
+          # --require-patterns only when a denylist is actually reachable —
+          # unchanged from before pull_request_target: a fork PR still runs
+          # shape-pattern (built-in) rules only, exactly as it did under plain
+          # pull_request, because the secret above is withheld from it either way.
           REQUIRE=""
           if [ -n "$DENYLIST" ]; then
             printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
             export CONFIDENTIALITY_DENYLIST_FILE="$RUNNER_TEMP/denylist.txt"
             REQUIRE="--require-patterns"
           else
-            echo "::notice::No denylist secret available to this run — built-in rules only."
+            echo "::notice::No denylist available to this run (fork PR, or the secret is not wired) — built-in rules only."
           fi
 
-          # Both commits' objects have to exist in ONE repo to diff them. base/
-          # is the authenticated checkout (persist-credentials left at its
-          # default so this fetch works on a private repo too); fetching
-          # HEAD_SHA into it — git objects only, nothing here executes
-          # anything from the tree — is enough for `git diff` to find their
-          # merge-base itself via `A...B` diff syntax. pr-head/ is never
-          # fetched into or diffed FROM: it is read from, below, as data.
-          git -C base fetch --no-tags origin "$HEAD_SHA"
+          # Both commits' objects have to exist in ONE repo to diff them.
+          # base/ has persist-credentials: false (see its checkout step
+          # above); this fetch supplies the token itself, scoped to this one
+          # git invocation via a throwaway http.extraheader, rather than
+          # leaving a credential helper configured in base/.git/config for
+          # the rest of the job. Needed for a private repo; harmless for a
+          # public one.
+          git -C base -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf '%s' "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')" \
+            fetch --no-tags origin "$HEAD_SHA"
 
           # --no-renames + R in the filter, deliberately, and both are load-
           # carrying: without them a rename-plus-edit is reported as a single R
@@ -222,14 +299,26 @@ jobs:
           # Paths are relative to pr-head/, which is exactly where the PR's
           # own file contents live — no merge commit to reconstruct, no
           # separate "is it in the merged tree" check: the PR head IS the
-          # tree being scanned.
+          # tree being scanned. No .compass-engine/* skip here (PR #52
+          # review, F6): that case existed when the engine used to be checked
+          # out INSIDE the gated tree; the PR tree now lives entirely under
+          # pr-head/, so ".compass-engine/..." in this diff can only ever be
+          # a path the PR itself authored, and skipping it would exempt
+          # exactly the PR-controlled files an attacker would pick to hide
+          # something behind a name that used to mean "not PR content".
           : > "$RUNNER_TEMP/scan.txt"
           while IFS= read -r -d '' f; do
-            case "$f" in .compass-engine/*) continue ;; esac
             if [ -f "pr-head/$f" ]; then
               printf 'pr-head/%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
             else
-              echo "::notice::$f is in the PR diff but not present at the PR head — not scanned."
+              # $f is PR-controlled (a path from the PR's own diff) — strip
+              # any newline/carriage-return before it reaches a workflow
+              # command, so a filename crafted to contain one can't inject a
+              # fake `::error::`/`::stop-commands::` line into this log
+              # (PR #52 review, F11; cosmetic, not a secrets or execution
+              # issue, fixed anyway since it's one `tr` away).
+              safe_f=$(printf '%s' "$f" | tr -d '\n\r')
+              echo "::notice::$safe_f is in the PR diff but not present at the PR head — not scanned."
             fi
           done < "$RUNNER_TEMP/changed.txt"
 
@@ -245,82 +334,77 @@ jobs:
 
   pin-check:
     # Separate job, separate status check: a PR that fails ONLY pin-check
-    # (governance itself is green — it ran main's workflow and main's pin,
-    # completely unaffected by whatever the PR's own copy says) should read
-    # as exactly that in the PR's checks list, not be folded into governance's
-    # pass/fail.
+    # (governance itself is green — it ran the default branch's workflow and
+    # pin, completely unaffected by whatever the PR's own copy says) should
+    # read as exactly that in the PR's checks list, not be folded into
+    # governance's pass/fail.
     name: pin-check
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Check out the base branch (this workflow's own trust anchor)
+      # GIT PLUMBING ONLY, same as governance's base/ checkout above — this
+      # check no longer reads any FILE content (PR #52 review, F1 made it
+      # path-based), so it doesn't check out pr-head/ at all anymore. It only
+      # needs the changed-path LIST, which a diff inside this one checkout
+      # provides once HEAD_SHA is fetched into it.
+      - name: Check out the default branch (git history only, for the diff below)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: base
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out the PR head as DATA ONLY (never executed)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: pr-head
-          persist-credentials: false
-
-      - name: refuse a pin change without the pin-bump label
+      - name: refuse a pin-sensitive path changed without the pin-bump label
         # HAS_PIN_BUMP_LABEL is computed by the `contains()` expression, not
         # interpolated PR text — the only thing that reaches the shell below
         # is the literal string "true" or "false". See pin-check.ts's own
         # header for why this shell reimplements, rather than invokes, that
         # file's evaluatePinChange (unit-tested there; the pin cannot yet
-        # point at a commit that includes it).
+        # point at a commit that includes it) — kept identical to it in
+        # substance: same three watched paths, same --no-renames diff.
         env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
           HAS_PIN_BUMP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'pin-bump') }}
         run: |
           set -euo pipefail
 
-          # ref: <40-hex> on the compass-core engine checkout step, anchored
-          # on the "compass-core pin" comment that line always carries — see
-          # the pin-check module's extractWorkflowRef (validators/pin-check.ts,
-          # under engine/), which this mirrors exactly.
-          extract_workflow_ref() {
-            grep -oP '(?<=ref: )[0-9a-f]{40}(?=\s*#.*compass-core pin)' "$1" 2>/dev/null || true
-          }
-          # const ENGINE_REF = "<40-hex>"; in engine/install.ts — mirrors
-          # extractEngineRef. Absent in a consumer repo (no install.ts there),
-          # which is fine: the loop below only compares it when the file
-          # exists on at least one side.
-          extract_engine_ref() {
-            grep -oP '(?<=^const ENGINE_REF = ")[0-9a-f]{40}(?=";$)' "$1" 2>/dev/null || true
-          }
+          # Same token-scoped-fetch idiom as governance's leak-check step —
+          # see that step's comment for why it's scoped to this one command.
+          git -C base -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf '%s' "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')" \
+            fetch --no-tags origin "$HEAD_SHA"
 
-          WORKFLOW_PATH=".github/workflows/compass-governance.yml"
-          BASE_WORKFLOW_REF=$(extract_workflow_ref "base/$WORKFLOW_PATH")
-          HEAD_WORKFLOW_REF=$(extract_workflow_ref "pr-head/$WORKFLOW_PATH")
+          # --no-renames, same reason as leak-check's diff: a rename of a
+          # watched path must show up as BOTH its old and new name in this
+          # list, not collapse into a single R entry this loop never sees.
+          git -C base diff --no-renames --name-only \
+            "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
 
+          # Deliberately path-based, not value-based (PR #52 review, F1):
+          # touching ANY of these three files at all requires the label,
+          # regardless of what changed inside — including a diff that
+          # deletes the pin-check job itself, which is still an edit to
+          # .github/workflows/compass-governance.yml.
           CHANGED=0
-          if [ "$BASE_WORKFLOW_REF" != "$HEAD_WORKFLOW_REF" ]; then
-            echo "::notice::$WORKFLOW_PATH engine pin: ${BASE_WORKFLOW_REF:-<absent>} -> ${HEAD_WORKFLOW_REF:-<absent>}"
-            CHANGED=1
-          fi
-
-          INSTALL_PATH="engine/install.ts"
-          if [ -f "base/$INSTALL_PATH" ] || [ -f "pr-head/$INSTALL_PATH" ]; then
-            BASE_ENGINE_REF=$([ -f "base/$INSTALL_PATH" ] && extract_engine_ref "base/$INSTALL_PATH" || true)
-            HEAD_ENGINE_REF=$([ -f "pr-head/$INSTALL_PATH" ] && extract_engine_ref "pr-head/$INSTALL_PATH" || true)
-            if [ "$BASE_ENGINE_REF" != "$HEAD_ENGINE_REF" ]; then
-              echo "::notice::$INSTALL_PATH ENGINE_REF: ${BASE_ENGINE_REF:-<absent>} -> ${HEAD_ENGINE_REF:-<absent>}"
+          for p in \
+            ".github/workflows/compass-governance.yml" \
+            "templates/workflows/compass-governance.yml" \
+            "engine/install.ts"; do
+            if grep -qxF "$p" "$RUNNER_TEMP/changed.txt"; then
+              echo "::notice::pin-sensitive path changed: $p"
               CHANGED=1
             fi
-          fi
+          done
 
           if [ "$CHANGED" = "1" ] && [ "$HAS_PIN_BUMP_LABEL" != "true" ]; then
-            echo "::error::This PR changes the governance engine pin without the 'pin-bump' label. Pin changes are admin-merged after review — add the label if this is a deliberate bump."
+            echo "::error::This PR touches a pin-sensitive path (the governance workflow or engine/install.ts) without the 'pin-bump' label. Pin changes are admin-merged after review — add the 'pin-bump' label to this PR; that will re-run this check."
             exit 1
           fi
 
           if [ "$CHANGED" = "1" ]; then
-            echo "Pin change detected and labelled pin-bump — OK, admin review required before merge."
+            echo "Pin-sensitive path(s) changed and this PR is labelled pin-bump — OK, admin review required before merge."
           else
-            echo "No pin change in this PR."
+            echo "No pin-sensitive path changed in this PR."
           fi

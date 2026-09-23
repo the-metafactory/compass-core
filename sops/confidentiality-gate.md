@@ -49,15 +49,16 @@ SOP: confidentiality-gate | Action: {engagement-open|sync|burn-in|enforce|fp|for
     *all repositories* makes the gate work everywhere and widens who can read the payload;
     scoping to *selected repositories* is tighter and needs upkeep as repos are added. Pick one
     deliberately — the hashing posture in §2 depends on which you chose.
-  - **Fork coverage.** This depends on how the gate is triggered. A gate on plain `pull_request`
-    never sees secrets on a fork PR, so it runs **shape-pattern tiers only** there, and a
-    maintainer MUST run the local gate before merging any fork PR (§5). compass-governance.yml
-    (compass-core#41) runs on `pull_request_target` instead specifically so the workflow and its
-    pin cannot be chosen by the PR that's gated by it — and that event hands EVERY PR the same
-    secrets and token, fork or not, so a repo on that workflow gets the denylist tier on fork PRs
-    too. §5's local-gate step is still worth running there as belt-and-suspenders, but it is no
-    longer the only thing standing between a fork PR and a degraded scan. A repo still gated by
-    plain `pull_request` keeps the original fork-coverage gap described above.
+  - **Fork coverage.** Secrets are not exposed to fork PRs, so the CI gate runs **shape-pattern
+    tiers only** there. A maintainer MUST run the local gate before merging any fork PR (§5).
+    This holds for compass-governance.yml (compass-core#41) too, even though that gate runs on
+    `pull_request_target` — a trigger that DOES hand every PR the same GITHUB_TOKEN, fork or not.
+    The denylist secret specifically is withheld from a fork PR there by an explicit `env:`
+    condition (`head.repo.full_name == github.repository`), not by anything about the trigger
+    itself: an unconditional `secrets.CONFIDENTIALITY_DENYLIST` under `pull_request_target` would
+    turn a public repo's own Actions logs into a one-guess-per-line oracle against the denylist
+    (leak-check prints `file:line: denylist[i]` per hit), which is exactly the failure mode this
+    §5 MUST exists to prevent.
 
 ---
 

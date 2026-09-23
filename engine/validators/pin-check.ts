@@ -7,188 +7,166 @@
  * 2026-09-24): "A separate check refuses any PR that changes the pin unless
  * it carries a label; such PRs are admin-merged after review."
  *
- * ## What "the pin" means
+ * ## The rule is PATH-based, not text-based (PR #52 review, F1)
  *
- * Two literal locations, both compared BASE (main) vs HEAD (the PR):
- *   1. `ref:` on the compass-core engine checkout step in
- *      `.github/workflows/compass-governance.yml` (or, in a rendered consumer
- *      copy, the same file at the same path) — the 40-hex commit SHA the
- *      compass-core engine is checked out at.
- *   2. `const ENGINE_REF = "...";` in `engine/install.ts` — the value the
- *      installer renders into (1) for every consumer. Present only in
- *      compass-core's own tree; a consumer repo never carries install.ts, and
- *      this check quietly skips that half when the file is absent on BOTH
- *      sides (see evaluatePinChange).
+ * A first cut of this file parsed the pin's VALUE out of the workflow and
+ * install.ts by regex and compared the two values. That is evadable by any
+ * edit that leaves the anchored line alone while changing what actually
+ * takes effect: a decoy line commented out beside a live one with no anchor
+ * comment, a second `actions/checkout` of the engine at a different ref
+ * added after the pinned one, `git checkout <sha>` spliced into a `run:`
+ * line, a second `ENGINE_REF`-shaped constant that shadows the real one at
+ * render time, or — the sharpest case — deleting the pin-check JOB itself
+ * while leaving the ref line completely untouched, which a value-comparison
+ * check has no way to even notice. All of these were demonstrated live
+ * against the text-based version (PR #52 review, F1): 5 of 6 fixtures
+ * evaded it outright, unlabelled.
  *
- * Either one changing, alone or together, is "a pin change". `--label`
- * decides whether that is refused.
+ * The fix does not try to out-parse every such trick. It asks a different,
+ * unevadable question: did this diff touch the FILE at all? Any change to
+ *   - `.github/workflows/compass-governance.yml`
+ *   - `templates/workflows/compass-governance.yml`
+ *   - `engine/install.ts`
+ * requires the `pin-bump` label — full stop, regardless of what changed
+ * inside. That can't be evaded from inside the file (there is no "inside"
+ * to hide in once the check is "was this path touched"), and it catches the
+ * pin-check job's own deletion for the same reason: removing a job IS an
+ * edit to the workflow file.
+ *
+ * `--no-renames` in the diff this reads means a rename shows up as a
+ * delete-and-add pair — both the old and the new path appear in the
+ * changed-path list — so a rename of any watched path is caught too, same
+ * as leak-check's own diff already relies on for the same reason.
  *
  * ## Why this is pure-function-first
  *
+ * evaluatePinChange takes the already-computed list of changed paths, not a
+ * git ref or a working tree — every fixture in __tests__/pin-check.test.ts
+ * calls it directly with a literal array standing in for "the diff", no
+ * git, no filesystem, no CI needed to exercise it.
+ *
  * The workflow step that actually runs this (see
  * templates/workflows/compass-governance.yml and the mirrored
- * .github/workflows/compass-governance.yml) implements the same extraction
- * and decision directly in shell, NOT by invoking this file. That is
- * deliberate, not an oversight: this repo's OWN pin (ENGINE_REF) cannot yet
- * point at a commit that includes this file at the moment it is introduced —
- * a pin must name an already-merged commit (engine-ref.test.ts enforces
- * that), and a file this PR adds cannot be merged before it is added. Rather
- * than let that bootstrapping order block the template from protecting
- * consumers on day one, the RUNTIME check is a small, self-contained shell
- * script with no dependency on a pinned engine checkout; this module exists
- * so the same logic is written once, is unit-tested (see
- * __tests__/pin-check.test.ts, which drives it directly — no workflow, no
- * shell, no CI needed to exercise it), and is available as
- * `bun engine/validators/pin-check.ts` for anyone who wants to run it by
- * hand, from a full compass-core checkout, against two working trees.
+ * .github/workflows/compass-governance.yml) implements the same
+ * path-membership check directly in shell, NOT by invoking this file. That
+ * is deliberate, not an oversight: this repo's OWN pin (ENGINE_REF) cannot
+ * yet point at a commit that includes this file at the moment it is
+ * introduced — a pin must name an already-merged commit
+ * (engine-ref.test.ts enforces that), and a file this PR adds cannot be
+ * merged before it is added. `bun engine/validators/pin-check.ts` is
+ * available for anyone who wants to run the same check by hand, from a full
+ * compass-core checkout, against two commits.
  *
  * Usage (CLI):
  *   bun engine/validators/pin-check.ts \
- *     --base-workflow <path> --head-workflow <path> \
- *     [--base-install <path>] [--head-install <path>] \
- *     [--label pin-bump] [--labels <comma-separated-list>]
+ *     --base-sha <sha> --head-sha <sha> \
+ *     [--labels <comma-separated-list>] [--cwd <path>]
+ *
+ * Runs `git diff --no-renames --name-only <base>...<head>` in `--cwd`
+ * (default: the current directory, which must be a git repo containing both
+ * commits) and decides from the result.
  *
  * Exit codes: 0 = no unlabelled pin change, 1 = refused, 2 = usage error.
  */
 
 import { parseArgs } from "node:util";
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const EXIT_OK = 0;
 const EXIT_REFUSED = 1;
 const EXIT_USAGE = 2;
 
 const USAGE = `Usage: bun engine/validators/pin-check.ts \\
-  --base-workflow <path> --head-workflow <path> \\
-  [--base-install <path>] [--head-install <path>] \\
-  [--labels <comma-separated-list>]`;
+  --base-sha <sha> --head-sha <sha> \\
+  [--labels <comma-separated-list>] [--cwd <path>]`;
 
 /**
- * Extracts the 40-hex commit SHA from the compass-core engine checkout step's
- * `ref:` line. Anchored on the "compass-core pin" comment that line always
- * carries (both the template and every render of it) — see
- * templates/workflows/compass-governance.yml — so an unrelated 40-hex value
- * elsewhere in the file (an action pin, say) is never picked up by accident.
- *
- * Returns null when the file has no such line — a deleted or drastically
- * rewritten workflow. A null is treated as "the pin is gone", which
- * evaluatePinChange still reports as a change.
+ * The exact set of paths a diff touching any of them requires `pin-bump`
+ * for. Repo-relative, POSIX separators — the shape `git diff --name-only`
+ * reports paths in, and the exact shape the workflow's own shell
+ * implementation compares against (kept identical on purpose: see that
+ * step's own comment for why this is not invoked from there directly).
  */
-export function extractWorkflowRef(workflowSource: string): string | null {
-  const m = workflowSource.match(/ref:\s*([0-9a-f]{40})\s*#.*compass-core pin/);
-  return m ? m[1]! : null;
-}
-
-/**
- * Extracts ENGINE_REF from engine/install.ts's own `const ENGINE_REF = "...";`
- * line — the exact same anchor engine-ref.test.ts uses (readEngineRef there),
- * deliberately: a comment quoting a SHA must not satisfy this either.
- */
-export function extractEngineRef(installTsSource: string): string | null {
-  const m = installTsSource.match(/^const ENGINE_REF = "([^"]*)";$/m);
-  return m ? m[1]! : null;
-}
-
-export interface PinSnapshot {
-  /** Contents of .github/workflows/compass-governance.yml (or the template). */
-  workflow: string;
-  /** Contents of engine/install.ts — absent in a consumer repo, which never carries it. */
-  install?: string | null;
-}
+export const PIN_SENSITIVE_PATHS = [
+  ".github/workflows/compass-governance.yml",
+  "templates/workflows/compass-governance.yml",
+  "engine/install.ts",
+] as const;
 
 export interface PinChangeResult {
   changed: boolean;
-  /** One entry per location that changed, human-readable, no secrets involved. */
-  changes: string[];
+  /** The subset of PIN_SENSITIVE_PATHS this diff actually touched. */
+  changedPaths: string[];
   /** true when the PR must be refused: changed && !hasPinBumpLabel. */
   blocked: boolean;
   message: string;
 }
 
 /**
- * The decision function. Pure: no filesystem, no process, no git — every
- * fixture in __tests__/pin-check.test.ts calls this directly with literal
- * strings standing in for "the diff".
- *
- * `install` is compared only when BOTH base and head provide it. A consumer
- * repo has neither (both undefined/null) and the install.ts half is silently
- * skipped — that is correct, not a gap: a consumer never carries the file
- * this check would be comparing, and the workflow-ref half already covers
- * the one pin a consumer's own tree can change. If exactly one side has it
- * (e.g. a PR that deletes engine/install.ts, or a rendered template that
- * never had it to begin with but somehow gained one), that asymmetry itself
- * counts as a change, on the same "silently missing is not the same as
- * silently unchanged" principle the rest of this codebase uses.
+ * The decision function. Pure: takes the diff's changed-path list (as
+ * `git diff --no-renames --name-only` would print it — one path per
+ * element, repo-relative) and the PR's current label state; returns
+ * whether it's a pin change and whether that's refused.
  */
-export function evaluatePinChange(
-  base: PinSnapshot,
-  head: PinSnapshot,
-  hasPinBumpLabel: boolean,
-): PinChangeResult {
-  const changes: string[] = [];
+export function evaluatePinChange(changedPaths: string[], hasPinBumpLabel: boolean): PinChangeResult {
+  const changed = new Set(changedPaths);
+  const hit = PIN_SENSITIVE_PATHS.filter((p) => changed.has(p));
 
-  const baseWorkflowRef = extractWorkflowRef(base.workflow);
-  const headWorkflowRef = extractWorkflowRef(head.workflow);
-  if (baseWorkflowRef !== headWorkflowRef) {
-    changes.push(
-      `workflow engine pin: ${baseWorkflowRef ?? "<absent>"} -> ${headWorkflowRef ?? "<absent>"}`,
-    );
-  }
+  const isChanged = hit.length > 0;
+  const blocked = isChanged && !hasPinBumpLabel;
 
-  const baseHasInstall = base.install !== undefined && base.install !== null;
-  const headHasInstall = head.install !== undefined && head.install !== null;
-  if (baseHasInstall || headHasInstall) {
-    const baseEngineRef = baseHasInstall ? extractEngineRef(base.install!) : null;
-    const headEngineRef = headHasInstall ? extractEngineRef(head.install!) : null;
-    if (baseEngineRef !== headEngineRef) {
-      changes.push(
-        `engine/install.ts ENGINE_REF: ${baseEngineRef ?? "<absent>"} -> ${headEngineRef ?? "<absent>"}`,
-      );
-    }
-  }
-
-  const changed = changes.length > 0;
-  const blocked = changed && !hasPinBumpLabel;
-
-  const message = !changed
-    ? "No pin change in this PR."
+  const message = !isChanged
+    ? "No pin-sensitive path changed in this PR."
     : blocked
-      ? `This PR changes the governance engine pin without the 'pin-bump' label:\n` +
-        changes.map((c) => `  - ${c}`).join("\n") +
-        `\nPin changes are admin-merged after review — add the 'pin-bump' label if this is a deliberate bump.`
-      : `Pin change detected and labelled 'pin-bump' — OK, admin review required before merge:\n` +
-        changes.map((c) => `  - ${c}`).join("\n");
+      ? `This PR touches a pin-sensitive path without the 'pin-bump' label:\n` +
+        hit.map((p) => `  - ${p}`).join("\n") +
+        `\nPin changes are admin-merged after review — add the 'pin-bump' label to this PR; that will re-run this check.`
+      : `Pin-sensitive path(s) changed and this PR is labelled 'pin-bump' — OK, admin review required before merge:\n` +
+        hit.map((p) => `  - ${p}`).join("\n");
 
-  return { changed, changes, blocked, message };
+  return { changed: isChanged, changedPaths: hit, blocked, message };
 }
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
-function readOptional(path: string | undefined): string | null {
-  if (!path) return null;
-  if (!existsSync(path)) return null;
-  return readFileSync(path, "utf8");
+/**
+ * Runs `git diff --no-renames --name-only <base>...<head>` and returns the
+ * changed paths, one per line, repo-relative. `--no-renames` deliberately —
+ * see the file header: a rename of a watched path must surface as both its
+ * old and new name, not collapse into an `R` entry evaluatePinChange never
+ * sees.
+ */
+export function computeChangedPaths(baseSha: string, headSha: string, cwd: string): string[] {
+  const proc = spawnSync(
+    "git",
+    ["diff", "--no-renames", "--name-only", `${baseSha}...${headSha}`],
+    { cwd, encoding: "utf8" },
+  );
+  if (proc.status !== 0) {
+    throw new Error(
+      `git diff --no-renames --name-only ${baseSha}...${headSha} failed (exit ${proc.status}): ${proc.stderr}`,
+    );
+  }
+  return proc.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
 }
 
 function main(): void {
   let values: {
-    "base-workflow"?: string;
-    "head-workflow"?: string;
-    "base-install"?: string;
-    "head-install"?: string;
+    "base-sha"?: string;
+    "head-sha"?: string;
     labels?: string;
+    cwd?: string;
   };
   try {
     ({ values } = parseArgs({
       args: process.argv.slice(2),
       options: {
-        "base-workflow": { type: "string" },
-        "head-workflow": { type: "string" },
-        "base-install": { type: "string" },
-        "head-install": { type: "string" },
+        "base-sha": { type: "string" },
+        "head-sha": { type: "string" },
         labels: { type: "string" },
+        cwd: { type: "string" },
       },
     }));
   } catch (err) {
@@ -197,28 +175,21 @@ function main(): void {
     process.exit(EXIT_USAGE);
   }
 
-  const baseWorkflowPath = values["base-workflow"];
-  const headWorkflowPath = values["head-workflow"];
-  if (!baseWorkflowPath || !headWorkflowPath) {
-    console.error("pin-check: --base-workflow and --head-workflow are required.");
+  const baseSha = values["base-sha"];
+  const headSha = values["head-sha"];
+  if (!baseSha || !headSha) {
+    console.error("pin-check: --base-sha and --head-sha are required.");
     console.error(USAGE);
     process.exit(EXIT_USAGE);
   }
-  if (!existsSync(baseWorkflowPath) || !existsSync(headWorkflowPath)) {
-    console.error(
-      `pin-check: both --base-workflow and --head-workflow must exist (${baseWorkflowPath}, ${headWorkflowPath}).`,
-    );
+
+  let changedPaths: string[];
+  try {
+    changedPaths = computeChangedPaths(baseSha, headSha, values.cwd ?? process.cwd());
+  } catch (err) {
+    console.error(`pin-check: ${(err as Error).message}`);
     process.exit(EXIT_USAGE);
   }
-
-  const base: PinSnapshot = {
-    workflow: readFileSync(baseWorkflowPath, "utf8"),
-    install: readOptional(values["base-install"]),
-  };
-  const head: PinSnapshot = {
-    workflow: readFileSync(headWorkflowPath, "utf8"),
-    install: readOptional(values["head-install"]),
-  };
 
   const labels = (values.labels ?? "")
     .split(",")
@@ -226,7 +197,7 @@ function main(): void {
     .filter((l) => l.length > 0);
   const hasPinBumpLabel = labels.includes("pin-bump");
 
-  const result = evaluatePinChange(base, head, hasPinBumpLabel);
+  const result = evaluatePinChange(changedPaths, hasPinBumpLabel);
   console.log(result.message);
   process.exit(result.blocked ? EXIT_REFUSED : EXIT_OK);
 }

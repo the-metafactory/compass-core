@@ -194,5 +194,170 @@ for (const fixture of FIXTURES) {
         }
       }
     });
+
+    // --- PR #52 review fixes -------------------------------------------
+
+    test("F3: the trigger reacts to labeled/unlabeled, not just opened/synchronize/reopened", () => {
+      const on = doc.on ?? doc[true];
+      const types: string[] = on.pull_request_target?.types ?? [];
+      for (const t of ["opened", "synchronize", "reopened", "labeled", "unlabeled"]) {
+        expect(types, `on.pull_request_target.types missing "${t}"`).toContain(t);
+      }
+    });
+
+    test("F4: the denylist secret is withheld from a fork PR, gated in env: not in the script", () => {
+      const jobs = doc.jobs ?? {};
+      let sawDenylistEnv = false;
+      for (const job of Object.values<any>(jobs)) {
+        for (const step of job.steps ?? []) {
+          const denylist = step?.env?.DENYLIST;
+          if (typeof denylist !== "string") continue;
+          sawDenylistEnv = true;
+          expect(
+            denylist,
+            "DENYLIST env value must compare head.repo.full_name against github.repository before falling back to the secret",
+          ).toContain("github.event.pull_request.head.repo.full_name == github.repository");
+          expect(denylist).toContain("secrets.CONFIDENTIALITY_DENYLIST");
+          // The fallback for a non-match must be empty, not the secret unconditionally.
+          expect(denylist).toMatch(/\|\|\s*''/);
+        }
+      }
+      expect(sawDenylistEnv, "expected a DENYLIST env: assignment on the leak-check step").toBe(true);
+    });
+
+    test("F5: claude-md-check and label-check read their config from base/, never pr-head/", () => {
+      const jobs = doc.jobs ?? {};
+      let sawConfigFlag = false;
+      for (const job of Object.values<any>(jobs)) {
+        for (const step of job.steps ?? []) {
+          if (typeof step.run !== "string" || !step.run.includes("--config")) continue;
+          sawConfigFlag = true;
+          expect(
+            step.run,
+            `step ${JSON.stringify(step.name)} passes --config from pr-head/ — a PR could disable its own checks`,
+          ).not.toMatch(/--config\s+pr-head\//);
+          expect(step.run).toMatch(/--config\s+base\/compass\.config\.yaml/);
+        }
+      }
+      expect(sawConfigFlag, "expected at least one --config flag (claude-md-check, label-check)").toBe(true);
+    });
+
+    test("F6: leak-check no longer skips a .compass-engine/* path inside the PR's own diff", () => {
+      const jobs = doc.jobs ?? {};
+      for (const job of Object.values<any>(jobs)) {
+        for (const step of job.steps ?? []) {
+          if (typeof step.run !== "string") continue;
+          expect(
+            step.run,
+            `step ${JSON.stringify(step.name)} still special-cases .compass-engine/* — that path can only be PR-authored now`,
+          ).not.toMatch(/\.compass-engine\/\*\)\s*continue/);
+        }
+      }
+    });
+
+    test("F10: symlinks under pr-head/ are rejected before any validator step runs", () => {
+      const jobs = doc.jobs ?? {};
+      let sawSymlinkGuard = false;
+      let guardIndex = -1;
+      let firstValidatorIndex = -1;
+      for (const job of Object.values<any>(jobs)) {
+        const steps: any[] = job.steps ?? [];
+        steps.forEach((step, i) => {
+          const runText = typeof step.run === "string" ? step.run : "";
+          if (/find\s+pr-head\s+-type\s+l/.test(runText)) {
+            sawSymlinkGuard = true;
+            guardIndex = i;
+          }
+          if (/claude-md-check|leak-check/.test(step.name ?? "") && firstValidatorIndex === -1) {
+            firstValidatorIndex = i;
+          }
+        });
+        if (sawSymlinkGuard) {
+          expect(guardIndex).toBeGreaterThanOrEqual(0);
+          if (firstValidatorIndex !== -1) {
+            expect(
+              guardIndex,
+              "the symlink guard must run before the first validator step in the same job",
+            ).toBeLessThan(firstValidatorIndex);
+          }
+        }
+      }
+      expect(sawSymlinkGuard, "expected a step that refuses symlinks under pr-head/ (find pr-head -type l)").toBe(
+        true,
+      );
+    });
+
+    test("F11: a PR-controlled filename echoed into a workflow-command notice has newlines stripped first", () => {
+      const jobs = doc.jobs ?? {};
+      let sawNoticeOfPRPath = false;
+      for (const job of Object.values<any>(jobs)) {
+        for (const step of job.steps ?? []) {
+          if (typeof step.run !== "string") continue;
+          if (!/::notice::\$f\b|::notice::\$safe_f\b/.test(step.run)) continue;
+          if (/::notice::\$safe_f\b/.test(step.run)) {
+            sawNoticeOfPRPath = true;
+            expect(
+              step.run,
+              `step ${JSON.stringify(step.name)} echoes $safe_f without first stripping newlines from $f`,
+            ).toMatch(/safe_f=.*tr -d '\\n\\r'/);
+          } else {
+            throw new Error(
+              `step ${JSON.stringify(step.name)} echoes the raw, unsanitised PR-controlled $f into ::notice::`,
+            );
+          }
+        }
+      }
+      expect(sawNoticeOfPRPath, "expected the leak-check step's PR-path notice to exist and use $safe_f").toBe(true);
+    });
+
+    test("every checkout step sets persist-credentials: false explicitly", () => {
+      const jobs = doc.jobs ?? {};
+      for (const job of Object.values<any>(jobs)) {
+        for (const step of job.steps ?? []) {
+          if (typeof step.uses === "string" && step.uses.startsWith("actions/checkout@")) {
+            expect(
+              step.with?.["persist-credentials"],
+              `step ${JSON.stringify(step.name)} does not set persist-credentials: false`,
+            ).toBe(false);
+          }
+        }
+      }
+    });
   });
 }
+
+describe("pin-check job — F1, path-based not value-based", () => {
+  const raw = readFileSync(join(REPO, "templates", "workflows", "compass-governance.yml"), "utf8");
+
+  test("the pin-check step's shell decides by path membership in the diff, not by parsing a ref value", () => {
+    const doc = parse(raw.replace(/\{\{template:compass_core_ref\}\}/, "0".repeat(40))) as any;
+    const pinCheckSteps: any[] = doc.jobs["pin-check"].steps ?? [];
+    const decisionStep = pinCheckSteps.find((s) => typeof s.run === "string" && s.run.includes("HAS_PIN_BUMP_LABEL"));
+    expect(decisionStep, "expected the pin-check decision step").toBeDefined();
+    const run = decisionStep.run as string;
+    // Must diff and check path membership for all three watched paths...
+    expect(run).toContain("git -C base diff --no-renames --name-only");
+    for (const p of [
+      ".github/workflows/compass-governance.yml",
+      "templates/workflows/compass-governance.yml",
+      "engine/install.ts",
+    ]) {
+      expect(run).toContain(p);
+    }
+    // ...and must NOT extract a ref value by regex anymore (the F1-defeated approach).
+    expect(run).not.toMatch(/grep -oP.*ref:/);
+    expect(run).not.toMatch(/ENGINE_REF/);
+  });
+
+  test("pin-check no longer checks out pr-head/ at all — it only needs the changed-path list", () => {
+    const doc = parse(raw.replace(/\{\{template:compass_core_ref\}\}/, "0".repeat(40))) as any;
+    const pinCheckSteps: any[] = doc.jobs["pin-check"].steps ?? [];
+    for (const step of pinCheckSteps) {
+      const ref = step?.with?.ref;
+      expect(
+        typeof ref === "string" && ref.includes("github.event.pull_request.head.sha"),
+        "pin-check should no longer check out the PR head as a separate directory (F1 made it path-based)",
+      ).toBe(false);
+    }
+  });
+});
