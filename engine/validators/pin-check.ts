@@ -23,20 +23,34 @@
  * evaded it outright, unlabelled.
  *
  * The fix does not try to out-parse every such trick. It asks a different,
- * unevadable question: did this diff touch the FILE at all? Any change to
- *   - `.github/workflows/compass-governance.yml`
+ * unevadable question: did this diff touch a watched FILE at all? Any change
+ * under:
+ *   - the whole `.github/workflows/` prefix (PR #52 round-2 review, G3 — not
+ *     just `compass-governance.yml`: a PR adding a NEW workflow file with
+ *     jobs named `governance`/`pin-check` that just run `true` puts a second,
+ *     fake green check with the same name beside the real ones. That can't
+ *     retarget what the real governance job runs, but once those check names
+ *     are required (Andreas's F2 ruling), which run GitHub counts for
+ *     mergeability is exactly the question — see the post-merge checklist's
+ *     name-squatting step. Guarding the whole prefix means ANY new or edited
+ *     workflow file needs `pin-bump` too, closing that off before it matters.)
  *   - `templates/workflows/compass-governance.yml`
+ *   - `templates/workflows/compass-pin-check.yml` (PR #52 round-2 review, G1
+ *     — this check moved into its own workflow file; see that file's own
+ *     header for why)
  *   - `engine/install.ts`
  * requires the `pin-bump` label — full stop, regardless of what changed
- * inside. That can't be evaded from inside the file (there is no "inside"
- * to hide in once the check is "was this path touched"), and it catches the
- * pin-check job's own deletion for the same reason: removing a job IS an
- * edit to the workflow file.
+ * inside. That can't be evaded from inside a file (there is no "inside" to
+ * hide in once the check is "was this path touched"), and it catches a job's
+ * own deletion for the same reason: removing a job IS an edit to the
+ * workflow file it lived in.
  *
  * `--no-renames` in the diff this reads means a rename shows up as a
  * delete-and-add pair — both the old and the new path appear in the
- * changed-path list — so a rename of any watched path is caught too, same
- * as leak-check's own diff already relies on for the same reason.
+ * changed-path list — so a rename of any watched path is caught too (either
+ * by the exact-path list or, for anything under `.github/workflows/`, by the
+ * prefix), same as leak-check's own diff already relies on for the same
+ * reason.
  *
  * ## Why this is pure-function-first
  *
@@ -46,16 +60,16 @@
  * git, no filesystem, no CI needed to exercise it.
  *
  * The workflow step that actually runs this (see
- * templates/workflows/compass-governance.yml and the mirrored
- * .github/workflows/compass-governance.yml) implements the same
- * path-membership check directly in shell, NOT by invoking this file. That
- * is deliberate, not an oversight: this repo's OWN pin (ENGINE_REF) cannot
- * yet point at a commit that includes this file at the moment it is
- * introduced — a pin must name an already-merged commit
- * (engine-ref.test.ts enforces that), and a file this PR adds cannot be
- * merged before it is added. `bun engine/validators/pin-check.ts` is
- * available for anyone who wants to run the same check by hand, from a full
- * compass-core checkout, against two commits.
+ * templates/workflows/compass-pin-check.yml and the mirrored
+ * .github/workflows/compass-pin-check.yml — its own file since PR #52
+ * round-2 review, G1) implements the same path-membership check directly in
+ * shell, NOT by invoking this file. That is deliberate, not an oversight:
+ * this repo's OWN pin (ENGINE_REF) cannot yet point at a commit that
+ * includes this file at the moment it is introduced — a pin must name an
+ * already-merged commit (engine-ref.test.ts enforces that), and a file this
+ * PR adds cannot be merged before it is added. `bun engine/validators/pin-check.ts`
+ * is available for anyone who wants to run the same check by hand, from a
+ * full compass-core checkout, against two commits.
  *
  * Usage (CLI):
  *   bun engine/validators/pin-check.ts \
@@ -81,25 +95,41 @@ const USAGE = `Usage: bun engine/validators/pin-check.ts \\
   [--labels <comma-separated-list>] [--cwd <path>]`;
 
 /**
- * The exact set of paths a diff touching any of them requires `pin-bump`
- * for. Repo-relative, POSIX separators — the shape `git diff --name-only`
- * reports paths in, and the exact shape the workflow's own shell
- * implementation compares against (kept identical on purpose: see that
- * step's own comment for why this is not invoked from there directly).
+ * Exact repo-relative paths a diff touching any of them requires `pin-bump`
+ * for — everything that isn't already covered by PIN_SENSITIVE_PREFIXES
+ * below. POSIX separators, the shape `git diff --name-only` reports paths
+ * in, and the exact shape the workflow's own shell implementation compares
+ * against (kept identical on purpose: see that step's own comment for why
+ * this is not invoked from there directly).
  */
 export const PIN_SENSITIVE_PATHS = [
-  ".github/workflows/compass-governance.yml",
   "templates/workflows/compass-governance.yml",
+  "templates/workflows/compass-pin-check.yml",
   "engine/install.ts",
 ] as const;
 
+/**
+ * Path PREFIXES a diff touching any of them requires `pin-bump` for — see
+ * the file header's G3 note. `.github/workflows/` covers both this repo's
+ * own two rendered workflow files (also individually redundant with a
+ * prefix hit, which is fine) AND any new file a PR adds there, closing the
+ * check-name-squatting gap a fixed two-file list would leave open.
+ */
+export const PIN_SENSITIVE_PREFIXES = [".github/workflows/"] as const;
+
 export interface PinChangeResult {
   changed: boolean;
-  /** The subset of PIN_SENSITIVE_PATHS this diff actually touched. */
+  /** The changed paths that matched (exactly or by prefix). */
   changedPaths: string[];
   /** true when the PR must be refused: changed && !hasPinBumpLabel. */
   blocked: boolean;
   message: string;
+}
+
+/** True when `path` is one of the exact watched paths or falls under a watched prefix. */
+export function isPinSensitivePath(path: string): boolean {
+  if ((PIN_SENSITIVE_PATHS as readonly string[]).includes(path)) return true;
+  return PIN_SENSITIVE_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
 /**
@@ -109,8 +139,7 @@ export interface PinChangeResult {
  * whether it's a pin change and whether that's refused.
  */
 export function evaluatePinChange(changedPaths: string[], hasPinBumpLabel: boolean): PinChangeResult {
-  const changed = new Set(changedPaths);
-  const hit = PIN_SENSITIVE_PATHS.filter((p) => changed.has(p));
+  const hit = changedPaths.filter(isPinSensitivePath);
 
   const isChanged = hit.length > 0;
   const blocked = isChanged && !hasPinBumpLabel;

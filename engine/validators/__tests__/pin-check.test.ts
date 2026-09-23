@@ -3,30 +3,44 @@
  * item 2: a PR that changes the governance engine pin must be refused unless
  * it carries the `pin-bump` label.
  *
- * PR #52 review, F1: the first cut of this check parsed the pin's VALUE out
- * of the file by regex, and was evadable by any edit that left the anchored
- * line alone. The fix is path-based: evaluatePinChange only asks whether the
- * diff touched one of the three watched files at all, never what changed
- * inside them. These fixtures cover:
+ * PR #52 round-1 review, F1: the first cut of this check parsed the pin's
+ * VALUE out of the file by regex, and was evadable by any edit that left the
+ * anchored line alone. The fix is path-based: evaluatePinChange only asks
+ * whether the diff touched a watched file (or, for `.github/workflows/`, a
+ * watched PREFIX) at all, never what changed inside. Round-2 review, G3:
+ * that prefix was added after a same-repo probe showed a NEW workflow file
+ * (not just an edit to an existing one) was invisible to the original
+ * fixed-list version — a squatting workflow naming its own jobs `governance`/
+ * `pin-check` needed no label at all.
+ *
+ * These fixtures cover:
  *   1. the three required cases from the original ruling (unlabelled change
  *      → blocked, labelled change → passes, unrelated diff → passes);
- *   2. the six evasions from the review (E1, E5, E6, E7, E10, E11), each
- *      confirmed to defeat the OLD (text-based) implementation — see
+ *   2. the six evasions from round 1's review (E1, E5, E6, E7, E10, E11),
+ *      each confirmed to defeat the OLD (text-based) implementation — see
  *      "watched failing on the pre-fix implementation" below — and each
  *      still caught here purely because the file's PATH is in the diff,
- *      regardless of the specific trick inside it.
+ *      regardless of the specific trick inside it;
+ *   3. G3: a brand-new file under `.github/workflows/` requires the label
+ *      too, not just edits to the two files this repo already ships.
  */
 
 import { describe, expect, test } from "bun:test";
-import { evaluatePinChange, PIN_SENSITIVE_PATHS } from "../pin-check.ts";
+import { evaluatePinChange, isPinSensitivePath, PIN_SENSITIVE_PATHS, PIN_SENSITIVE_PREFIXES } from "../pin-check.ts";
 
 const WORKFLOW = ".github/workflows/compass-governance.yml";
+const PIN_CHECK_WORKFLOW = ".github/workflows/compass-pin-check.yml";
 const TEMPLATE = "templates/workflows/compass-governance.yml";
+const PIN_CHECK_TEMPLATE = "templates/workflows/compass-pin-check.yml";
 const INSTALL = "engine/install.ts";
 
-describe("PIN_SENSITIVE_PATHS", () => {
-  test("names exactly the three watched paths, repo-relative", () => {
-    expect([...PIN_SENSITIVE_PATHS].sort()).toEqual([INSTALL, TEMPLATE, WORKFLOW].sort());
+describe("PIN_SENSITIVE_PATHS / PIN_SENSITIVE_PREFIXES", () => {
+  test("names the two templates and install.ts as exact paths, repo-relative", () => {
+    expect([...PIN_SENSITIVE_PATHS].sort()).toEqual([INSTALL, PIN_CHECK_TEMPLATE, TEMPLATE].sort());
+  });
+
+  test("watches the whole .github/workflows/ prefix, not just the two rendered files by name", () => {
+    expect([...PIN_SENSITIVE_PREFIXES]).toEqual([".github/workflows/"]);
   });
 });
 
@@ -168,5 +182,52 @@ describe("evaluatePinChange — the six review evasions, all caught path-based",
     for (const paths of [[WORKFLOW], [INSTALL]]) {
       expect(evaluatePinChange(paths, true).blocked).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G3 (round-2 review, non-blocking but required this round): check-name
+// squatting. A fixed two-file list watches EDITS to compass-governance.yml
+// and compass-pin-check.yml, but not the ADDITION of some other file under
+// .github/workflows/ — and GitHub runs a `pull_request`-triggered workflow
+// from the PR's OWN copy, so a brand-new file with jobs literally named
+// `governance` and `pin-check` that just `run: "true"` puts a second green
+// check with the same names beside the real ones, unlabelled. It can't
+// retarget what the REAL governance job checks out or runs — but once these
+// check names are required (Andreas's F2 ruling), which run GitHub counts
+// for mergeability is exactly the open question a squatting file raises.
+// Watching the whole .github/workflows/ prefix closes the "unlabelled" part
+// of that regardless of how GitHub ultimately resolves duplicate names.
+// ---------------------------------------------------------------------------
+
+describe("evaluatePinChange — G3: check-name squatting via a NEW workflow file", () => {
+  test("a brand-new .github/workflows/x.yml requires pin-bump, unlabelled", () => {
+    const result = evaluatePinChange([".github/workflows/x.yml"], false);
+    expect(result.changed).toBe(true);
+    expect(result.blocked).toBe(true);
+  });
+
+  test("a new file anywhere else under .github/workflows/ is caught the same way", () => {
+    for (const p of [
+      ".github/workflows/totally-legit.yml",
+      ".github/workflows/nested/dir/sneaky.yml",
+    ]) {
+      expect(evaluatePinChange([p], false).blocked, p).toBe(true);
+    }
+  });
+
+  test("passes once labelled pin-bump, same as any other watched path", () => {
+    expect(evaluatePinChange([".github/workflows/x.yml"], true).blocked).toBe(false);
+  });
+
+  test("isPinSensitivePath agrees with evaluatePinChange on the prefix", () => {
+    expect(isPinSensitivePath(".github/workflows/x.yml")).toBe(true);
+    expect(isPinSensitivePath(".github/workflows-not-really/x.yml")).toBe(false);
+    expect(isPinSensitivePath("README.md")).toBe(false);
+  });
+
+  test("both pin-check workflow files (G1: pin-check moved to its own file) are watched", () => {
+    expect(evaluatePinChange([PIN_CHECK_WORKFLOW], false).blocked).toBe(true);
+    expect(evaluatePinChange([PIN_CHECK_TEMPLATE], false).blocked).toBe(true);
   });
 });
