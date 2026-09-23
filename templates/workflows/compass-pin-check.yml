@@ -117,7 +117,16 @@ jobs:
           # --no-renames, same reason as leak-check's diff: a rename of a
           # watched path must show up as BOTH its old and new name in this
           # list, not collapse into a single R entry this loop never sees.
-          git -C base diff --no-renames --name-only \
+          #
+          # -z, load-bearing (#55, PR #52 round-3 review, H1): without it,
+          # `--name-only` C-quotes any path with a non-ASCII byte, a tab, a
+          # `"` or a control character — same `core.quotePath` default the
+          # runner has — so the quoted line no longer starts with
+          # `.github/workflows/` and slips past the case pattern below
+          # unlabelled. -z also means a literal newline inside a filename
+          # can never be mistaken for an entry boundary, which is why the
+          # read loop below reads NUL-delimited, never line-delimited.
+          git -C base diff --no-renames --name-only -z \
             "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
 
           # Deliberately path-based, not value-based (PR #52 review, F1):
@@ -128,24 +137,22 @@ jobs:
           # NEW workflow file instead of editing an existing one — a fake
           # `governance`/`pin-check`-named job in a new file is still an edit
           # under a guarded prefix.
+          #
+          # One NUL-delimited read loop does both the prefix check and the
+          # three exact-path checks (#55): the earlier version's second pass
+          # used `grep -qxF` line-by-line against the same file, which is
+          # exactly the word-splitting/line-splitting exposure -z exists to
+          # remove — reintroducing it in a second reader would have made the
+          # first fix pointless.
           CHANGED=0
-          while IFS= read -r p; do
+          while IFS= read -r -d '' p; do
             case "$p" in
-              .github/workflows/*)
+              .github/workflows/*|templates/workflows/compass-governance.yml|templates/workflows/compass-pin-check.yml|engine/install.ts)
                 echo "::notice::pin-sensitive path changed: $p"
                 CHANGED=1
                 ;;
             esac
           done < "$RUNNER_TEMP/changed.txt"
-          for p in \
-            "templates/workflows/compass-governance.yml" \
-            "templates/workflows/compass-pin-check.yml" \
-            "engine/install.ts"; do
-            if grep -qxF "$p" "$RUNNER_TEMP/changed.txt"; then
-              echo "::notice::pin-sensitive path changed: $p"
-              CHANGED=1
-            fi
-          done
 
           if [ "$CHANGED" = "1" ] && [ "$HAS_PIN_BUMP_LABEL" != "true" ]; then
             echo "::error::This PR touches a pin-sensitive path (a .github/workflows/ file, the governance/pin-check templates, or engine/install.ts) without the 'pin-bump' label. Pin changes are admin-merged after review — add the 'pin-bump' label to this PR; that will re-run this check."
