@@ -43,7 +43,7 @@ gh pr view {N} --json mergeStateStatus --jq '.mergeStateStatus'
 | **SecurityReview** | Explicit security-only focus. Code quality + OWASP-oriented security analysis. Use when the PR touches auth, input validation, secrets handling, or dependencies. |
 | **StandardReview** | Lightweight. Code quality + auto-detected lenses. Use only for trivial PRs (typo fixes, doc-only changes, dependency bumps). |
 | **HardeningReview** | Defensive/adversarial pass for security-sensitive or trust-path code — abuse cases, input validation, failure modes beyond the OWASP surface. |
-| **SweepReview** | Fix-or-justify sweep (`--fix` mode). Resolves each finding in place or records an explicit justification. See the **Sweep / --fix mode** section below. |
+| **SweepReview** | Fix-or-justify sweep (`--fix` mode). Resolves each bucketed finding in place or records an explicit justification. See the **Sweep / --fix mode** section below. |
 
 ---
 
@@ -137,7 +137,7 @@ Where a threat model is stated: a finding is assigned its normal severity and bu
 
 ## Sweep / --fix mode
 
-Review can run in **sweep (`--fix`) mode**: instead of only reporting findings, the reviewer resolves each one under a **fix-or-justify** contract — every finding is either fixed in place or given an explicit written justification for why it stands. This is the mode an autonomous work loop invokes per slice, rather than handing a report back to a human.
+Review can run in **sweep (`--fix`) mode**: instead of only reporting findings, the reviewer resolves each one under a **fix-or-justify** contract — every bucketed finding (§ 1) is either fixed in place or given an explicit written justification for why it stands. This is the mode an autonomous work loop invokes per slice, rather than handing a report back to a human.
 
 The verdict contract is unchanged in sweep mode: findings still carry the four severities above, plus `info` (§ 4), which needs neither a fix nor a justification — it's listed in the sweep's *Known limits, for an issue* record and does not count toward the sweep's verdict. The sweep is complete only when every other finding is either fixed or carries a recorded justification.
 
