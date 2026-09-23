@@ -401,14 +401,26 @@ function shingleWindows(normalized: string, n: number): string[] {
 // count says whether a shingle's presence is explained ENTIRELY by the
 // control (never reported — it's corpus content) or partly/wholly by the
 // diff's own runs (reportable — it's the PR's own content).
-function runsToShingles(runs: string[], n: number): Map<string, number> {
-  const out = new Map<string, number>();
+//
+// Also returns `wordCount`, the exact word total of whatever `runs` THIS
+// CALL actually processed (round 6, K1/word-count fix) — not a count
+// maintained in a separate variable elsewhere, which a mutation could leave
+// correct while changing what's actually passed to a *different* call. The
+// caller compares this against an independently-captured expectation
+// (`plusWordCount`, from extractAddedRuns) immediately after the call that
+// produces the shingle set actually used for matching, so a bypass of that
+// specific call — not just a narrowing of the array feeding it — is caught.
+function runsToShingles(runs: string[], n: number): { shingles: Map<string, number>; wordCount: number } {
+  const shingles = new Map<string, number>();
+  let wordCount = 0;
   for (const r of runs) {
-    for (const s of shingleWindows(normalizeWhitespace(r), n)) {
-      out.set(s, (out.get(s) ?? 0) + 1);
+    const normalized = normalizeWhitespace(r);
+    if (normalized.length > 0) wordCount += normalized.split(" ").length;
+    for (const s of shingleWindows(normalized, n)) {
+      shingles.set(s, (shingles.get(s) ?? 0) + 1);
     }
   }
-  return out;
+  return { shingles, wordCount };
 }
 
 /**
@@ -552,17 +564,6 @@ function extractAddedRuns(
   }
   flush();
   return { runs, plusLineCount, fileOrder, plusWordCount };
-}
-
-/** Total word count across a list of runs, after the same normalisation `runsToShingles` applies. */
-function countWords(runs: string[]): number {
-  let total = 0;
-  for (const r of runs) {
-    const normalized = normalizeWhitespace(r);
-    if (normalized.length === 0) continue;
-    total += normalized.split(" ").length;
-  }
-  return total;
 }
 
 /**
@@ -974,31 +975,35 @@ if (corpus.controlFragment === null) {
 }
 
 const controlRun = corpus.controlFragment;
-const controlWordCount = countWords([controlRun]);
 const combinedRuns = [...addedRuns, controlRun];
 
-// J3 (round 5): plusWordCount was computed AND RETURNED by extractAddedRuns,
-// before this line ever ran — reassigning `addedRuns`, or narrowing the
-// spread above, cannot retroactively change that already-captured number.
-// Comparing it against a fresh recount of `combinedRuns` here catches either
-// mutation: both leave `actualWordCount` short of what the patch actually
-// contained, which the control's own presence (unaffected either way, since
-// it's the LAST element appended) would not have noticed on its own.
-const actualWordCount = countWords(combinedRuns) - controlWordCount;
+// controlCounts is used only to tell provenance apart below (a bookkeeping
+// read, not the security decision); allShingles — built from combinedRuns in
+// ONE call — is the shared, sabotage-sensitive source of truth both the
+// control's pass/fail AND the real search's matches come from.
+const controlResult = runsToShingles([controlRun], shingleSize);
+const controlCounts = controlResult.shingles;
+const allResult = runsToShingles(combinedRuns, shingleSize);
+const allShingles = allResult.shingles;
+const matches = findMatches(allShingles.keys(), corpusHas);
+
+// J3 (round 5) / K1 (round 6): plusWordCount was computed AND RETURNED by
+// extractAddedRuns, before any of this ran. `allResult.wordCount` is not a
+// separately-maintained variable that a mutation could leave correct while
+// changing what actually reaches `runsToShingles` — it is the word count
+// runsToShingles ITSELF processed to build allShingles, in the SAME call.
+// So this catches not only `addedRuns` (or the spread above) being narrowed
+// or reassigned, but also the call itself being bypassed in favour of a
+// smaller array (e.g. `runsToShingles([controlRun], n)`) while `combinedRuns`
+// is left correct and simply unused — round 5's check, based on recounting
+// `combinedRuns` directly, could not see that.
+const actualWordCount = allResult.wordCount - controlResult.wordCount;
 if (actualWordCount !== plusWordCount) {
   inert(
     `the diff's shingle-source word count (${actualWordCount}) does not match the word count extracted from the ` +
       `patch (${plusWordCount}) — refusing to trust a diff read that disagrees with itself.`,
   );
 }
-
-// controlCounts is used only to tell provenance apart below (a bookkeeping
-// read, not the security decision); allShingles — built from combinedRuns in
-// ONE call — is the shared, sabotage-sensitive source of truth both the
-// control's pass/fail AND the real search's matches come from.
-const controlCounts = runsToShingles([controlRun], shingleSize);
-const allShingles = runsToShingles(combinedRuns, shingleSize);
-const matches = findMatches(allShingles.keys(), corpusHas);
 
 if (![...controlCounts.keys()].some((s) => matches.includes(s))) {
   inert(
@@ -1022,19 +1027,29 @@ function fromRealDiff(shingle: string): boolean {
 
 const rawMatches = matches.filter(fromRealDiff);
 
-// J3 (round 5): the control validates the SEARCH (does the corpus's index
-// find a known-present shingle) but never ran anywhere near this filter — a
-// mutation reducing `rawMatches` further than fromRealDiff, unsabotaged,
-// would ever justify (e.g. `matches.filter(() => false)`) passes the control
-// and still prints a false "clean." Re-deriving how many entries SHOULD have
-// been filtered out, from the same (unsabotaged) fromRealDiff, and comparing
-// it against how many actually were, catches that at the report itself.
-const explainableFilteredOut = matches.filter((s) => !fromRealDiff(s)).length;
-const actualFilteredOut = matches.length - rawMatches.length;
-if (actualFilteredOut !== explainableFilteredOut) {
+// K1 (round 6): a round-5 review found the check this replaced compared two
+// quantities both derived from `fromRealDiff` over `matches` — they
+// partition `matches` by definition, so they were equal for ANY predicate,
+// including a broken one (forced to `false`, off by one, or with the search
+// itself narrowed). It could only ever fire on a REASSIGNMENT of
+// `rawMatches`, never on the filtering LOGIC being wrong. Replaced with a
+// genuinely independent re-derivation: `addedRuns` ALONE (no control run
+// mixed in, so no provenance arithmetic is needed at all) run through
+// runsToShingles() and corpusHas() — both already exercised by the control
+// above — but sharing NOTHING with `fromRealDiff`, `controlCounts`, or
+// `allShingles`. `rawMatches` must equal this exactly; any disagreement
+// means the shared pipeline and this independent one disagree about the
+// same diff, which the control's own pass does not by itself rule out.
+const expectedMatches = new Set(
+  [...runsToShingles(addedRuns, shingleSize).shingles.keys()].filter((s) => corpusHas(s)),
+);
+const actualMatches = new Set(rawMatches);
+const matchesAgree =
+  actualMatches.size === expectedMatches.size && [...expectedMatches].every((s) => actualMatches.has(s));
+if (!matchesAgree) {
   inert(
-    "the reported match count does not match what the report's own filtering logic should have produced — " +
-      "refusing to trust a result that disagrees with itself.",
+    "the reported matches do not agree with an independently re-derived match set — refusing to trust a result " +
+      "that disagrees with itself.",
   );
 }
 

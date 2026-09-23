@@ -905,7 +905,7 @@ describe("corpus-overlap.ts — G1: the control exercises the real diff-side pat
   });
 
   test("INJECTED: diff-side normalisation is skipped (runsToShingles stops calling normalizeWhitespace) → OBSERVED: INERT, exit 2 (previously: exit 0, the real match silently missed)", () => {
-    const mutatedTool = mutate("shingleWindows(normalizeWhitespace(r), n)", "shingleWindows(r, n)");
+    const mutatedTool = mutate("const normalized = normalizeWhitespace(r);", "const normalized = r;");
     // makeCorpus()'s raw text has a genuine whitespace irregularity in its
     // first 6 words (a double space and a mid-phrase newline) — see its own
     // doc comment — so a control that stops normalising has something real
@@ -981,7 +981,7 @@ describe("corpus-overlap.ts — G1: the control exercises the real diff-side pat
     // to empty also erases the control's own contribution — there is no
     // longer a separate "control path" this mutation can leave untouched.
     const mutatedTool = mutate(
-      "const allShingles = runsToShingles(combinedRuns, shingleSize);",
+      "const allShingles = allResult.shingles;",
       "const allShingles = new Map<string, number>();",
     );
     const corpus = makeCorpus();
@@ -1078,6 +1078,103 @@ describe("corpus-overlap.ts — G1: the control exercises the real diff-side pat
     expect(output).toContain("INERT");
   });
 
+  // K1 (round 6): the round-5 filter check compared two quantities both
+  // derived from `fromRealDiff(matches)` — they partition `matches` by
+  // construction, so they were equal for ANY predicate, including a broken
+  // one. It could fire only on a REASSIGNMENT of `rawMatches`, never on the
+  // filtering logic itself being wrong. These four tests mutate the
+  // predicate/lookup/shingle-source directly, as the review did, using a
+  // planted match that is DELIBERATELY NOT the same text the control draws
+  // (control always draws makeCorpus()'s first six words; these tests plant
+  // a match from its second line instead) — a narrowed lookup that happens
+  // to still admit the control's own coincidental shingle would otherwise
+  // mask exactly the bug under test.
+  const SECOND_LINE_PHRASE = "Generic padding text that exists only";
+
+  test("INJECTED: fromRealDiff forced to return false → OBSERVED: INERT, exit 2 (previously: exit 0, clean, with a planted match present)", () => {
+    const mutatedTool = mutate(
+      "return (allShingles.get(shingle) ?? 0) > (controlCounts.get(shingle) ?? 0);",
+      "return false;",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${SECOND_LINE_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("INJECTED: fromRealDiff off by one (requires MORE than one occurrence beyond the control's count) → OBSERVED: INERT, exit 2 (previously: exit 0, clean — a match occurring once was silently dropped)", () => {
+    const mutatedTool = mutate(
+      "return (allShingles.get(shingle) ?? 0) > (controlCounts.get(shingle) ?? 0);",
+      "return (allShingles.get(shingle) ?? 0) > (controlCounts.get(shingle) ?? 0) + 1;",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${SECOND_LINE_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("INJECTED: the search lookup is narrowed to shingles ALSO present in controlCounts (corpusHas(s) && controlCounts.has(s)) → OBSERVED: INERT, exit 2 (previously: exit 0, clean — a genuine diff-only match, absent from the control's own shingle, was silently excluded from the search)", () => {
+    const mutatedTool = mutate(
+      "const matches = findMatches(allShingles.keys(), corpusHas);",
+      "const matches = findMatches(allShingles.keys(), (s) => corpusHas(s) && controlCounts.has(s));",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${SECOND_LINE_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("INJECTED: allShingles built from ONLY the control run (runsToShingles([controlRun], n), bypassing combinedRuns while leaving it intact) → OBSERVED: INERT, exit 2 (round 5's word-count check read combinedRuns directly and could not see this call-level bypass; round 6 reads the count runsToShingles itself returns)", () => {
+    const mutatedTool = mutate(
+      "const allResult = runsToShingles(combinedRuns, shingleSize);",
+      "const allResult = runsToShingles([controlRun], shingleSize);",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${SECOND_LINE_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
   test("the UNMUTATED tool still passes cleanly on the same fixtures (sanity: the mutations above are real breakages, not false positives)", () => {
     const corpus = makeCorpus();
     const consumer = join(workDir, "consumer");
@@ -1089,6 +1186,41 @@ describe("corpus-overlap.ts — G1: the control exercises the real diff-side pat
     const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("the UNMUTATED tool: exit 1 on a planted match, exit 0 with no match, and exit 1 when the diff's own content equals the control's own drawn text (round 6's explicit three-case sanity)", () => {
+    const corpus = makeCorpus();
+
+    // Case 1: a planted match (not the control's own text) → exit 1.
+    const consumer1 = join(workDir, "consumer1");
+    initRepo(consumer1);
+    const base1 = commit(consumer1, [write(consumer1, "README.md", "hello\n")], "base");
+    commit(consumer1, [write(consumer1, "added.txt", `${SECOND_LINE_PHRASE}\n`)], "head");
+    const head1 = git(["rev-parse", "HEAD"], consumer1);
+    const r1 = run(["--corpus", corpus, "--base", base1, "--head", head1], consumer1);
+    expect(r1.exitCode).toBe(1);
+
+    // Case 2: no overlap with the corpus at all → exit 0.
+    const consumer2 = join(workDir, "consumer2");
+    initRepo(consumer2);
+    const base2 = commit(consumer2, [write(consumer2, "README.md", "hello\n")], "base");
+    commit(consumer2, [write(consumer2, "added.txt", "nothing here overlaps the fixture corpus whatsoever\n")], "head");
+    const head2 = git(["rev-parse", "HEAD"], consumer2);
+    const r2 = run(["--corpus", corpus, "--base", base2, "--head", head2], consumer2);
+    expect(r2.exitCode).toBe(0);
+
+    // Case 3: the diff's own content equals the control's own drawn text
+    // (PLANTED_PHRASE — makeCorpus()'s first six words, exactly what the
+    // control always draws) → exit 1, still reported, not swallowed as
+    // "control-only" (the provenance/count fix from round 4).
+    const consumer3 = join(workDir, "consumer3");
+    initRepo(consumer3);
+    const base3 = commit(consumer3, [write(consumer3, "README.md", "hello\n")], "base");
+    commit(consumer3, [write(consumer3, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head3 = git(["rev-parse", "HEAD"], consumer3);
+    const r3 = run(["--corpus", corpus, "--base", base3, "--head", head3], consumer3);
+    expect(r3.exitCode).toBe(1);
+    expect(r3.output).toContain(PLANTED_PHRASE);
   });
 });
 

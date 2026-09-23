@@ -233,15 +233,30 @@ either shared function — but NOT, on its own, a mutation that narrows or repla
 (a review found two: the spread narrowed from `[...addedRuns, controlRun]` to `[controlRun]`, and
 `addedRuns` reassigned to `[]` right after extraction). Either way the control's own shingle is
 still present — it's appended after whatever the array already holds — so the control alone cannot
-notice the real diff's contribution is gone. That gap is closed separately: `extractAddedRuns`
-returns an exact word count for what it extracted, captured before any of the above could run, and
-a fresh recount of the array actually used for shingling is compared against it immediately before
-that array is used — any shortfall is INERT. A third mutation the same review found sits past even
-that: replacing the final report's own filter (`rawMatches = matches.filter(() => false)`) discards
-a real match `matches` already correctly held, entirely outside anything a search-side control could
-ever see. That is closed the same way, one stage later — independently re-deriving how many entries
-the report's own (unsabotaged) filtering logic should have dropped, and refusing to trust the report
-if the actual count disagrees.
+notice the real diff's contribution is gone. That gap is closed separately: `runsToShingles` itself
+returns the exact word count of whatever it just processed, in the SAME call that produces the
+shingle set used for matching — not a count read from a separate variable elsewhere, which a later
+review found could be left correct while the *call* was pointed at a smaller array instead
+(`runsToShingles([controlRun], n)`, bypassing the combined array while leaving it untouched). That
+returned count is compared, immediately, against an independent expectation `extractAddedRuns`
+captured before any of this ran; any shortfall is INERT.
+
+**The match report is checked against an independent re-derivation, not against itself.** An
+earlier version of this check computed two counts both derived from the same filtering predicate
+over the same `matches` — they partitioned `matches` by construction, so they were equal for any
+predicate, including a broken one, and the check could fire only when the `rawMatches` variable was
+reassigned outright, never when the filtering *logic* was wrong (forced to reject everything, off
+by one, or with the search itself narrowed to admit only shingles the control happens to share).
+The fix computes the diff's own shingles alone — `runsToShingles(addedRuns, n)`, with no control run
+mixed in and so no provenance arithmetic needed — intersects that with `corpusHas`, and requires the
+reported matches to equal that set exactly. It still shares `runsToShingles` and `corpusHas` with the
+control above (already exercised there), but shares nothing with the filtering predicate itself, so
+a broken predicate produces a disagreement the check can actually see. **What this does not cover:**
+benign-list honouring — deciding a reported match is excused by an entry at `--base`, and moving it
+from "unreviewed" to "honoured" — happens after this check runs and is not itself re-verified at
+runtime. That stage is guarded only by the ordinary planted-match and benign-list tests in
+`corpus-overlap.test.ts` (a benign entry that shouldn't honour a match, but does, would show up
+there as a wrong exit code on an existing test — not as an INERT this tool produces on its own).
 
 The diff read is hardened against the PR under scan controlling its own visibility: `git diff` runs
 with `--no-ext-diff --no-textconv --text --no-renames`, so a `.gitattributes` `-diff` marker or a
