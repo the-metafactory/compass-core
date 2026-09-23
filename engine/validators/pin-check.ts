@@ -52,6 +52,17 @@
  * prefix), same as leak-check's own diff already relies on for the same
  * reason.
  *
+ * `-z` is likewise load-bearing (#55, PR #52 round-3 review, H1): without
+ * it, `--name-only` C-quotes any path containing a non-ASCII byte, a tab, a
+ * `"` or a control character (git's default `core.quotePath` behaviour), and
+ * the quoted line no longer starts with `.github/workflows/` for
+ * `startsWith` to match, nor equals any of PIN_SENSITIVE_PATHS exactly — a
+ * new workflow file named e.g. `gövernance.yml` passed this check
+ * unlabelled. computeChangedPaths below splits the raw stdout on `\0`
+ * instead of `\n`, and does NOT trim entries (a path can legitimately start
+ * or end with whitespace; trimming would silently corrupt it and, worse,
+ * could make two distinct paths collide).
+ *
  * ## Why this is pure-function-first
  *
  * evaluatePinChange takes the already-computed list of changed paths, not a
@@ -76,7 +87,7 @@
  *     --base-sha <sha> --head-sha <sha> \
  *     [--labels <comma-separated-list>] [--cwd <path>]
  *
- * Runs `git diff --no-renames --name-only <base>...<head>` in `--cwd`
+ * Runs `git diff --no-renames --name-only -z <base>...<head>` in `--cwd`
  * (default: the current directory, which must be a git repo containing both
  * commits) and decides from the result.
  *
@@ -161,24 +172,33 @@ export function evaluatePinChange(changedPaths: string[], hasPinBumpLabel: boole
 // ---------------------------------------------------------------------------
 
 /**
- * Runs `git diff --no-renames --name-only <base>...<head>` and returns the
- * changed paths, one per line, repo-relative. `--no-renames` deliberately —
- * see the file header: a rename of a watched path must surface as both its
- * old and new name, not collapse into an `R` entry evaluatePinChange never
- * sees.
+ * Runs `git diff --no-renames --name-only -z <base>...<head>` and returns
+ * the changed paths, repo-relative. `--no-renames` deliberately — see the
+ * file header: a rename of a watched path must surface as both its old and
+ * new name, not collapse into an `R` entry evaluatePinChange never sees.
+ *
+ * `-z` deliberately too (#55, PR #52 round-3 review, H1): without it, git
+ * C-quotes any path with a non-ASCII byte, a tab, a `"` or a control
+ * character, and the quoted line (`"path/g\303\266vernance.yml"`) matches
+ * neither PIN_SENSITIVE_PATHS nor the `.github/workflows/` prefix — a
+ * pin-sensitive file with such a name would pass this check unlabelled. With
+ * `-z`, entries are NUL-terminated and never quoted, so the split below on
+ * `\0` (never `\n`, and never `.trim()`ed — a leading/trailing space or an
+ * embedded newline in a filename is real path content, not something to
+ * strip) recovers every path exactly as it exists on disk.
  */
 export function computeChangedPaths(baseSha: string, headSha: string, cwd: string): string[] {
   const proc = spawnSync(
     "git",
-    ["diff", "--no-renames", "--name-only", `${baseSha}...${headSha}`],
+    ["diff", "--no-renames", "--name-only", "-z", `${baseSha}...${headSha}`],
     { cwd, encoding: "utf8" },
   );
   if (proc.status !== 0) {
     throw new Error(
-      `git diff --no-renames --name-only ${baseSha}...${headSha} failed (exit ${proc.status}): ${proc.stderr}`,
+      `git diff --no-renames --name-only -z ${baseSha}...${headSha} failed (exit ${proc.status}): ${proc.stderr}`,
     );
   }
-  return proc.stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  return proc.stdout.split("\0").filter((l) => l.length > 0);
 }
 
 function main(): void {
