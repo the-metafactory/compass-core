@@ -164,6 +164,39 @@ if that is not true of the id in front of you, fix the fixture instead.
   session where it was found. A gate nobody maintains becomes the bypass culture the gate exists
   to prevent.
 
+### 4c. Private-corpus overlap check (`corpus-overlap.ts`)
+
+Before a PR leaves a shared repo, check its added lines for overlap with a private corpus you
+hold separately (for example an engagement's private jobs overlay) — the check this SOP used to
+leave to a hand-rolled `git grep -F -f`:
+
+```bash
+bun engine/validators/corpus-overlap.ts \
+  --corpus /path/to/private-corpus-checkout \
+  --base <merge-base-sha> --head <PR-head-sha>
+```
+
+It breaks the diff's added lines into 6-word shingles (`--n` changes the size) and checks each one
+against the corpus via `git -C <corpus> grep`, read-only — it never writes to the corpus and never
+reads it any other way. Output is the shingle count, the match count, and each unreviewed match's
+shingle **text** — **never a corpus path, filename, or line**: the corpus is private, and this is
+the same withholding discipline as leak-check's NEVER-ECHO rule (§0).
+
+Before trusting a clean result, the tool draws a control shingle out of the corpus itself and
+confirms the search can find it there. If it can't — wrong path, empty checkout, a git failure —
+the run reports **INERT** (exit 2), not clean: a search never proven capable of finding a match
+cannot certify zero.
+
+**The benign list** (`.corpus-overlap-benign.yaml`, in the *consuming* repo, public) follows the
+same rule as §4b: each entry is `{shingle, reason, reviewed_by, date}` with a mandatory reason,
+and it is loaded from the PR's **base** commit, never its head — **no benign addition in the same
+PR as the match it excuses**. An honoured entry is counted in the output; a benign entry that no
+longer matches the corpus at all is reported **stale**, so the list doesn't accumulate dead
+carve-outs.
+
+Exit codes: `0` clean (matches honoured or none found), `1` unreviewed matches, `2` INERT or usage
+error.
+
 ---
 
 ## 5. Fork-PR procedure
