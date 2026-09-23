@@ -72,9 +72,9 @@ refactor: extract label parsing into shared util
 
 A detector hit — a linter, a leak scanner, a CI gate, any automated red — resolves exactly one of three ways:
 
-(a) **Code changed**, because the detector was right. Name the desired state in one sentence that does not mention the detector, its rule, or passing: "fixtures use only synthetic names", not "reworded to clear the scrub". If the edit changes only whether the detector matches (fixture or test text, a renamed identifier, a restructured line with the same behaviour), (a) is not available. Resolve it as (b) or (c).
-(b) **Detector corrected**, because it was wrong. Either fix its pattern, with a test that watches it fail on the false positive first, or use its sanctioned exemption with a reason: e.g. `gate:allow <reason>`, the leak-check allow marker (#31), or the private-corpus scrub's reviewed-benign list (#32).
-(c) **Left open**, filed as an issue.
+- (a) **Code changed**, because the detector was right. Name the desired state in one sentence that does not mention the detector, its rule, or passing: "fixtures use only synthetic names", not "reworded to clear the scrub". If the edit changes only whether the detector matches (fixture or test text, a renamed identifier, a restructured line with the same behaviour), (a) is not available. Resolve it as (b) or (c).
+- (b) **Detector corrected**, because it was wrong. Either fix its pattern, with a test that watches it fail on the false positive first, or use its sanctioned exemption with a reason: e.g. `gate:allow <reason>`, the leak-check allow marker (#31), or the private-corpus scrub's reviewed-benign list (#32).
+- (c) **Left open**, filed as an issue.
 
 **Rewording until it passes is not a resolution.** Rewriting a fixture, renaming a variable, or restructuring a test line so a scanner stops matching — with no change to the desired state — is evasion under the test above, whichever of the three resolutions it's dressed up as. It gets refused in review (`sops/pr-review.md`) whether or not the author meant it that way.
 
