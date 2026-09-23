@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -79,14 +79,24 @@ function commit(dir: string, files: string[], message: string): string {
   return git(["rev-parse", "HEAD"], dir);
 }
 
-/** A corpus with one generic, invented "private" line, long enough to shingle at n=6. */
+/**
+ * A corpus with one generic, invented "private" line, long enough to shingle
+ * at n=6. The first 6 words are DELIBERATELY written with a double space and
+ * a mid-phrase line break — normalising still collapses this to exactly
+ * PLANTED_PHRASE, but the raw (pre-normalisation) span G1's control draws
+ * from this file is genuinely irregular, so a control that stops normalising
+ * (sabotage #2, below) has something real to disagree with. A corpus whose
+ * raw text happened to already be perfectly clean would let that specific
+ * sabotage slip through undetected — not because the fix is wrong, but
+ * because the input gave it nothing to catch.
+ */
 function makeCorpus(): string {
   const dir = join(workDir, "corpus");
   initRepo(dir);
   write(
     dir,
     "notes.txt",
-    "The quarterly roadmap review covers three invented workstreams for planning purposes only.\n" +
+    "The  quarterly roadmap\nreview covers three invented workstreams for planning purposes only.\n" +
       "Generic padding text that exists only to give the corpus a second line.\n",
   );
   commit(dir, ["notes.txt"], "seed corpus");
@@ -236,7 +246,15 @@ describe("corpus-overlap.ts — F2: the diff side cannot be emptied by the PR un
     expect(r.output).toContain(PLANTED_PHRASE);
   });
 
-  test("INJECTED: added file contains a NUL byte (would be auto-detected as binary) → OBSERVED: never exit 0/clean", () => {
+  test("INJECTED: added file contains a NUL byte (genuinely binary, confirmed by content) → OBSERVED: excluded and named, never silently folded into clean (G4 supersedes the round-1 blanket INERT here)", () => {
+    // As of G4, a file numstat calls binary is only excluded once its actual
+    // HEAD content confirms a real NUL byte (isActuallyBinaryAtHead) — a
+    // genuine NUL-byte file passes that check, so it is now excluded and
+    // reported by name rather than making the whole run INERT. The content
+    // hidden inside it (even a real leak) is not caught by THIS run — that
+    // is the accepted, documented trade-off for not blocking every PR that
+    // touches a real binary file (§4c). What must never happen is SILENCE:
+    // the exclusion is always named.
     const corpus = makeCorpus();
     const consumer = join(workDir, "consumer");
     initRepo(consumer);
@@ -247,7 +265,30 @@ describe("corpus-overlap.ts — F2: the diff side cannot be emptied by the PR un
 
     const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
 
-    expect(r.exitCode).not.toBe(0);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("1 binary file(s) not scanned");
+    expect(r.stdout).toContain("added.bin");
+  });
+
+  test("INJECTED: a NUL-byte binary file AND a separate real leak in a normal text file, same PR → OBSERVED: the binary file is excluded and named, the text file's match is still caught (exit 1)", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    writeFileSync(join(consumer, "added.bin"), `lead\x00in binary content, no relation to anything\n`);
+    commit(
+      consumer,
+      ["added.bin", write(consumer, "caption.txt", `${PLANTED_PHRASE} continues.\n`)],
+      "head",
+    );
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+    expect(r.stdout).toContain("1 binary file(s) not scanned");
+    expect(r.stdout).toContain("added.bin");
   });
 
   test("a numstat/unified-diff disagreement is reported as INERT, not silently swallowed", () => {
@@ -675,6 +716,46 @@ describe("corpus-overlap.ts — never leaks the corpus path, filename, or line",
     expect(r.output).not.toContain(corpus);
     expect(r.output).not.toContain("notes.txt");
   });
+
+  test("the scope line never names a corpus branch, even when --refs all searches one specifically for its content", () => {
+    const corpus = makeCorpus();
+    git(["checkout", "-q", "-b", "other-branch"], corpus);
+    write(corpus, "branch-only.txt", "A distinct secret phrase only on the other corpus branch entirely.\n");
+    commit(corpus, ["branch-only.txt"], "branch-only content");
+    git(["checkout", "-q", "main"], corpus);
+
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", "clean unrelated content\n")], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.output).not.toContain("other-branch");
+    expect(r.output).not.toContain("branch-only.txt");
+  });
+
+  test("a reported gitlink/submodule never names the submodule's path or source", () => {
+    const submoduleSrc = join(workDir, "submodule-src");
+    initRepo(submoduleSrc);
+    commit(submoduleSrc, [write(submoduleSrc, "s.txt", "submodule content\n")], "submodule seed");
+
+    const corpus = makeCorpus();
+    Bun.spawnSync(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", submoduleSrc, "sub"], {
+      cwd: corpus,
+    });
+    commit(corpus, ["sub", ".gitmodules"], "add submodule");
+
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const head = commit(consumer, [write(consumer, "added.txt", "unrelated clean content\n")], "head");
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.output).not.toContain(submoduleSrc);
+    expect(r.output).not.toContain("/sub\n");
+    expect(r.output).not.toContain("submodule-src");
+  });
 });
 
 describe("corpus-overlap.ts — mechanics", () => {
@@ -732,5 +813,312 @@ describe("corpus-overlap.ts — mechanics", () => {
     const r = run(["--corpus", corpus, "--base", base, "--head", head, "--benign", "custom-benign.yaml"], consumer);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("1 honoured");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// G1 (round 3): the control must exercise the REAL diff-side code path, not a
+// self-referential check that can never fail. These tests mutate the ACTUAL
+// tool source (read from disk, one exact string replaced, written to a fresh
+// temp file, then run as the tool) — never a reimplementation of its logic —
+// so a future refactor that silently reintroduces circularity fails these
+// tests instead of passing them by accident.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — G1: the control exercises the real diff-side path, and can fail", () => {
+  const SOURCE = resolve(import.meta.dir, "..", "corpus-overlap.ts");
+  const sourceText = readFileSync(SOURCE, "utf8");
+
+  function mutate(anchor: string, replacement: string): string {
+    expect(sourceText).toContain(anchor); // fails loudly if a refactor moved the anchor
+    const mutated = sourceText.replace(anchor, replacement);
+    expect(mutated).not.toBe(sourceText);
+    const path = join(workDir, `mutated-${Math.random().toString(36).slice(2)}.ts`);
+    writeFileSync(path, mutated);
+    return path;
+  }
+
+  test("INJECTED: the corpus lookup (corpusHas) is disabled, returning false unconditionally → OBSERVED: INERT, exit 2 (previously: a planted match printed clean, exit 0)", () => {
+    const mutatedTool = mutate("return corpus.shingles.has(shingle);", "return false;");
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("INJECTED: diff-side normalisation is skipped (runsToShingles stops calling normalizeWhitespace) → OBSERVED: INERT, exit 2 (previously: exit 0, the real match silently missed)", () => {
+    const mutatedTool = mutate("shingleWindows(normalizeWhitespace(r), n)", "shingleWindows(r, n)");
+    // makeCorpus()'s raw text has a genuine whitespace irregularity in its
+    // first 6 words (a double space and a mid-phrase newline) — see its own
+    // doc comment — so a control that stops normalising has something real
+    // to disagree with, not an already-clean string that happens to survive
+    // unnormalised by coincidence.
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("INJECTED: corpus-side shingling is asymmetrically upper-cased (diff side untouched) → OBSERVED: INERT, exit 2 (previously: exit 0, a real match silently missed by case mismatch)", () => {
+    const mutatedTool = mutate(
+      "const normalized = normalizeWhitespace(text!);",
+      "const normalized = normalizeWhitespace(text!).toUpperCase();",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("the UNMUTATED tool still passes cleanly on the same fixtures (sanity: the mutations above are real breakages, not false positives)", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// G2/G3 (round 3): scope. Every ref reachable from every branch/tag tip is
+// searched by default; --refs HEAD narrows it; what's skipped (gitlinks,
+// binary corpus blobs) is counted and printed, never silently absorbed.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — G2/G3: multi-ref scope, printed on every run", () => {
+  test("INJECTED: text exists ONLY on a non-HEAD corpus branch → OBSERVED: missed with --refs HEAD, caught by default (--refs all)", () => {
+    const corpus = makeCorpus();
+    git(["checkout", "-q", "-b", "other-branch"], corpus);
+    write(corpus, "branch-only.txt", "A distinct secret phrase only on the other corpus branch entirely.\n");
+    commit(corpus, ["branch-only.txt"], "branch-only content");
+    git(["checkout", "-q", "main"], corpus);
+
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(
+      consumer,
+      [write(consumer, "added.txt", "A distinct secret phrase only on the other corpus branch entirely.\n")],
+      "head",
+    );
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const headOnly = run(["--corpus", corpus, "--base", base, "--head", head, "--refs", "HEAD"], consumer);
+    expect(headOnly.exitCode).toBe(0); // missed: not on HEAD
+
+    const allRefs = run(["--corpus", corpus, "--base", base, "--head", head], consumer); // default
+    expect(allRefs.exitCode).toBe(1); // caught: --refs all is the default
+    expect(allRefs.output).toContain("distinct secret phrase only on the");
+  });
+
+  test("--refs must be HEAD or all — anything else is a usage error, exit 2", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const head = commit(consumer, [write(consumer, "a.txt", "x\n")], "head");
+    const r = run(["--corpus", corpus, "--base", base, "--head", head, "--refs", "bogus"], consumer);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("--refs");
+  });
+
+  test("INJECTED: the corpus contains a submodule (gitlink) → OBSERVED: reported by count as not searched, on every run", () => {
+    const submoduleSrc = join(workDir, "submodule-src");
+    initRepo(submoduleSrc);
+    commit(submoduleSrc, [write(submoduleSrc, "s.txt", "submodule content\n")], "submodule seed");
+
+    const corpus = makeCorpus();
+    Bun.spawnSync(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", submoduleSrc, "sub"], {
+      cwd: corpus,
+    });
+    commit(corpus, ["sub", ".gitmodules"], "add submodule");
+
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const head = commit(consumer, [write(consumer, "added.txt", "unrelated clean content\n")], "head");
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.stdout).toContain("NOT searched: 1 gitlink(s)/submodule(s)");
+  });
+
+  test("the scope line — refs, paths, blobs, bytes, not-searched counts — is printed on every run, including a clean one", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const head = commit(consumer, [write(consumer, "added.txt", "nothing overlapping the corpus at all\n")], "head");
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/scope — \d+ ref\(s\) searched .*\d+ path\(s\) reachable.*\d+ blob\(s\) read.*\d+ byte\(s\).*NOT searched: \d+ gitlink/);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// G4 (round 3): binary files in the DIFF (not the corpus). A genuinely binary
+// file is excluded (confirmed by content, not trusted from numstat alone) and
+// named; the rest of the same diff still scans normally. numstat's binary
+// verdict for a .gitattributes-forced file must NOT be trusted blindly —
+// that would reopen the exact F2 evasion this tool already closed.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — G4: binary files scan the rest of the diff, but can't fake it", () => {
+  test("INJECTED: a PR adds a real PNG (binary) next to a text caption carrying a real match → OBSERVED: the PNG is excluded and named, the caption's match is still caught, exit 1", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const pngBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(200, 0),
+    ]);
+    writeFileSync(join(consumer, "hero.png"), pngBytes);
+    writeFileSync(join(consumer, "caption.txt"), `${PLANTED_PHRASE}\n`);
+    commit(consumer, ["hero.png", "caption.txt"], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+    expect(r.stdout).toContain("1 binary file(s) not scanned");
+    expect(r.stdout).toContain("hero.png");
+  });
+
+  test("INJECTED: .gitattributes '-diff' forces numstat to call a real TEXT file binary → OBSERVED: still INERT — a false 'binary' verdict is refused, not silently excluded (regression guard: this is F2's original attack)", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(
+      consumer,
+      [write(consumer, ".gitattributes", "* -diff\n"), write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)],
+      "head",
+    );
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("INERT");
+    // Must NOT be the silent-exclusion path — it must say the verdict was
+    // distrusted, not just report a binary-file count.
+    expect(r.stderr).toContain("disagrees with itself");
+  });
+
+  test("INJECTED: an added line's content starts with '++' (e.g. '++counter;') → OBSERVED: read as content, not misread as a '+++' file header — no false INERT", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const head = commit(consumer, [write(consumer, "added.txt", "++counter;\n")], "head");
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(0); // clean — the content just doesn't match the corpus
+    expect(r.stderr).not.toContain("INERT");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Small items (round 3): zero-width character stripping.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — zero-width characters are stripped during normalisation", () => {
+  test("INJECTED: the corpus has a U+200B (zero-width space) mid-word in the planted phrase → OBSERVED: exit 1, still caught", () => {
+    const dir = join(workDir, "corpus-zw");
+    initRepo(dir);
+    write(dir, "notes.txt", "The​ quarterly​ roadmap review covers three invented workstreams.\n");
+    commit(dir, ["notes.txt"], "seed");
+
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE} invented workstreams.\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", dir, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(1);
+  });
+
+  test("INJECTED: the DIFF's added line has zero-width joiners (U+200C/U+200D) inserted between words → OBSERVED: exit 1, still caught", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    // Zero-width characters ride ALONGSIDE real whitespace here (not in place
+    // of it) — mirroring how they actually turn up in copy-pasted or
+    // tracking-marked text, and matching normalizeWhitespace's contract:
+    // strip the invisible character, then collapse the real whitespace next
+    // to it. A ZWSP replacing a space entirely is a different (word-fusing)
+    // question this fix doesn't claim to answer.
+    const withZeroWidth = "The‌ quarterly‍ roadmap review covers three invented workstreams.\n";
+    commit(consumer, [write(consumer, "added.txt", withZeroWidth)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(1);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Small items (round 3): UTF-16 corpus content is decoded and searched.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — UTF-16 corpus blobs are decoded and searched, not silently skipped", () => {
+  test("INJECTED: a corpus file is UTF-16LE with a BOM → OBSERVED: decoded, counted as UTF-16 in scope, and its content is caught (exit 1)", () => {
+    const dir = join(workDir, "corpus-utf16le");
+    initRepo(dir);
+    const text = PLANTED_PHRASE + " invented workstreams for planning purposes only.";
+    const codeUnits = Buffer.from(text, "utf16le");
+    const bom = Buffer.from([0xff, 0xfe]);
+    writeFileSync(join(dir, "notes-utf16.txt"), Buffer.concat([bom, codeUnits]));
+    commit(dir, ["notes-utf16.txt"], "seed utf16");
+
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE} invented workstreams.\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", dir, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toMatch(/\d+ blob\(s\) read \(1 as UTF-16\)/);
   });
 });

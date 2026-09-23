@@ -179,47 +179,87 @@ bun engine/validators/corpus-overlap.ts \
 ```
 
 It breaks the diff's added lines into *n*-word shingles (`--n`, default 6) and checks the set
-against a shingle set built once from the corpus's **HEAD tree only** (`git -C <corpus> ls-tree` +
-`cat-file --batch`, read-only — it never writes to the corpus, never reads its working tree or
-index, and never touches the filesystem directly). Output is the shingle count, the match count,
-and each unreviewed match's shingle **text** — **never a corpus path, filename, or line**: the
-corpus is private, and this is the same withholding discipline as leak-check's NEVER-ECHO rule
-(§0).
+against a shingle set built once from the corpus's read (`git -C <corpus> for-each-ref` +
+`ls-tree` + `cat-file --batch`, read-only — it never writes to the corpus, never reads its working
+tree or index, and never touches the filesystem directly). Output is the shingle count, the match
+count, and each unreviewed match's shingle **text** — **never a corpus path, filename, ref name,
+or line**: the corpus is private, and this is the same withholding discipline as leak-check's
+NEVER-ECHO rule (§0).
+
+**Scope — searched every run, printed every run (`--refs HEAD|all`, default `all`):** by default
+the tool searches every blob reachable from every local branch, remote-tracking branch, and tag
+tip, deduplicated by content — not HEAD alone. `--refs HEAD` narrows it back to HEAD only, which
+is faster but searches less; the first line of every run states which was used, plus refs
+searched, paths reachable, blobs read, and total bytes, so the scope is never a guess. Three
+things are **never folded silently into a clean result**, and are always counted (never just
+"0 matches"):
+  - **gitlinks/submodules** — `ls-tree` entries of type `commit` point at a separate repository
+    this tool does not follow. Counted as not searched.
+  - **binary corpus blobs** — content with a NUL in its first 8KB (the same heuristic
+    `leak-check.ts` uses) is counted as not searched, never shingled.
+  - **UTF-16 corpus blobs** (BOM-detected, LE or BE) ARE decoded and searched, and counted
+    separately in the "blobs read" line — a UTF-16 file with no BOM, or any other multi-byte
+    encoding, is indistinguishable from binary to the NUL heuristic and is counted as binary.
+  Two things are **out of scope entirely**, invisible to any of the counts above because this tool
+  has no way to see them: content only in the corpus checkout's **uncommitted working tree or
+  index** (only committed, ref-reachable content is ever read), and the real content behind a
+  **Git LFS pointer file** (the pointer text is searched like any blob; the object it points to is
+  never fetched).
 
 **Any git failure, anywhere in the read, is INERT — never treated as "no match."** The corpus read
-(the tree listing, the batched object read, and their own internal consistency — an object count
-or a byte count that doesn't add up) and the diff read (cross-checked against a second,
+(refs, tree listings, the batched object read, and their own internal consistency — an object
+count or a byte count that doesn't add up) and the diff read (cross-checked against a second,
 independent `git diff --numstat` run) are both verified this way. Before trusting a clean result,
-the tool also draws a control shingle out of the corpus's own shingle set and confirms it's a
-member of that same set — if none can be drawn (no commit, no file, no run of `--n` words anywhere
-in the corpus after whitespace normalisation), the run is INERT too. A search that degraded
-partway through and then reported zero matches would be indistinguishable from a clean result,
-and INERT (exit 2) exists so that never happens silently.
+the tool draws a raw, pre-normalisation fragment from the corpus and runs it through the **same
+diff-side pipeline a real added line goes through** (parse it as a synthetic added run, normalise,
+window into shingles, then look it up the same way a real match is looked up) — not a check that
+the corpus's own shingle set is merely non-empty, which can never fail once the corpus has been
+read at all and proves nothing about whether the diff side would actually find something real. If
+the two pipelines disagree about the exact same text, the run is INERT: that disagreement is the
+observable symptom of a broken lookup, a normalisation step that silently stopped running, or the
+corpus and diff sides drifting out of sync — not "the corpus is empty," which is a narrower and
+weaker claim.
 
 The diff read is hardened against the PR under scan controlling its own visibility: `git diff` runs
-with `--no-ext-diff --no-textconv --text`, so a `.gitattributes` `-diff` marker, a `diff.external`
-config, or an embedded NUL byte cannot make the tool see an empty or binary-skipped diff. `--base`
-and `--head` are verified with `git rev-parse --verify --end-of-options` and refused outright if
-either looks like a flag (e.g. `--base=--output=<file>`) — a ref is data, never an option to the
-git commands it's passed to.
+with `--no-ext-diff --no-textconv --text --no-renames`, so a `.gitattributes` `-diff` marker, a
+`diff.external` config, or an embedded NUL byte cannot make the tool see an empty or binary-skipped
+diff. `--base` and `--head` are verified with `git rev-parse --verify --end-of-options` and refused
+outright if either looks like a flag (e.g. `--base=--output=<file>`) — a ref is data, never an
+option to the git commands it's passed to.
+
+**Binary files in the diff** (not the corpus — see Scope above for that) are handled, not treated
+as a reason to refuse the whole PR: a file `--numstat` reports as binary is excluded from both the
+added-line cross-check and from shingling, and every other file in the same diff still scans
+normally — a PR that adds an image alongside a text change gets a real result on the text change,
+not a blanket INERT. But `--numstat`'s "binary" verdict is itself something the PR under scan can
+influence (the same `.gitattributes -diff` marker above makes `--numstat` say "binary" for a file
+`--text` still shows as real content), so a "binary" verdict is only trusted once the file's actual
+HEAD content backs it up — a real NUL byte in its first 8KB. A "binary" verdict that the content
+doesn't support is INERT, not a silent exclusion: trusting it would reopen the exact empty-diff
+evasion the paragraph above closes. Every excluded file is named in the output — safe, because the
+path is from the public PR, never the corpus.
 
 **The benign list** (`.corpus-overlap-benign.yaml`, in the *consuming* repo, public) follows the
 same rule as §4b: each entry is `{shingle, reason, reviewed_by, date}` with a mandatory reason,
 and it is loaded from the PR's **base** commit, never its head — **no benign addition in the same
 PR as the match it excuses**. A malformed file at base (invalid YAML, a top-level mapping instead
 of a list, or any entry missing `shingle` or a non-empty `reason`) is a hard failure (exit 2,
-naming the file), never silently treated as empty. The benign file is itself scanned like any
-other added file — only shingles already honoured (parsed from base) are exempt, so a new entry
-added at head that happens to match the corpus flags itself, by construction. An honoured entry is
-counted in the output; a benign entry that no longer matches the corpus at all is reported
-**stale**, so the list doesn't accumulate dead carve-outs.
+naming the file), never silently treated as empty. The one git-read failure in this tool that is
+**deliberately not INERT**: the benign file simply not existing at base (never created, or only
+added at head) — that means "nothing is honoured this run," which the file's own absence already
+implies, not a broken read. The benign file is itself scanned like any other added file — only
+shingles already honoured (parsed from base) are exempt, so a new entry added at head that happens
+to match the corpus flags itself, by construction. An honoured entry is counted in the output; a
+benign entry that no longer matches the corpus at all is reported **stale**, so the list doesn't
+accumulate dead carve-outs.
 
 **Limits, not silently absorbed:** matching is case-sensitive, and HTML entities are not decoded
 (`&amp;` and a literal `&` are different words to the tokenizer). Both are tracked, not silently
 tolerated — see #36.
 
 Exit codes: `0` clean (matches honoured or none found), `1` unreviewed matches, `2` INERT (the
-control shingle couldn't be confirmed, or a read failed or was inconsistent) or a usage error.
+control fragment didn't match through the real search path, or a read failed or was inconsistent)
+or a usage error.
 
 ---
 
