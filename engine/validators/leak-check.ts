@@ -54,6 +54,59 @@
  * scanned; only the recursive walk declines. Same for binary files (NUL in the
  * first 8 KB) and files over the size cap: skipped, counted, never silent.
  *
+ * CODE EXPRESSIONS ARE NOT CREDENTIALS (issue #31): `credential-assignment`
+ * used to flag any `token:`/`secret:`/`password:` followed by 8+ unquoted
+ * characters, including a code expression that merely happens to be long
+ * enough — `token: ZERO_REPORTS().token` (a call), `token: zeroReports.token`
+ * (a member access), `token: computeTally(x)` (a call with an argument).
+ * "token" was a domain word there, not a secret, and rewording the code to
+ * dodge the detector was the wrong fix (see the companion SOP issue #30 and
+ * the factory PR #280 review this issue references).
+ *
+ * The rule now excludes UNQUOTED values that are provably code: a member or
+ * call expression (`a.b`, `f(x)`, `a.b.getToken().value`), an object/array
+ * literal, or a spread (`{...}`, `[...]`, `...x`) — see
+ * `looksLikeCodeExpression()`. This applies only to the unquoted branch of the
+ * match. A QUOTED value is a string literal by construction and is never
+ * exempted this way: `token: "ghp_…"` and a bare unquoted 40-char token both
+ * still block, because quoting a real credential must never launder it past
+ * this check.
+ *
+ * SANCTIONED FALSE-POSITIVE ESCAPE — `leak-check:allow` (issue #31): mirrors
+ * `gate:allow` in sops/confidentiality-gate.md §4a, on purpose, because it is
+ * the same shape of problem (a finding that is real but acceptable, escaped
+ * inline, never a blanket skip and never `--no-verify`):
+ *
+ *   line of code                          // leak-check:allow <rule> — <reason>
+ *
+ *   - One line only, same rules as §4a: the marker suppresses findings ONLY
+ *     for the rule it names, ONLY on the line it sits on. A different rule's
+ *     finding sharing that line is untouched — the marker cannot become a
+ *     blanket skip by naming one rule and hiding another.
+ *   - A reason is mandatory and must contain a letter or digit — a bare
+ *     marker, or one with a punctuation-only "reason" (`— ---`), suppresses
+ *     nothing; the finding still blocks and a warning explains why
+ *     (`leak-check-allow-unjustified`).
+ *   - Any comment syntax works (`//`, `#`, `<!-- -->`, …) — the marker is
+ *     matched anywhere on the line, not tied to a language's comment grammar.
+ *   - The separator is the em dash `—` (as in the SOP) or `--` as a plain-
+ *     ASCII fallback, since not every keyboard types an em dash easily.
+ *   - Honoured exemptions are never silent: each prints as
+ *     `[EXEMPT] file:line: rule — reason` and is counted in the
+ *     `N exemption(s) honoured` summary.
+ *
+ *   NON-EXEMPTABLE RULES (mirrors §4a's "not exemptable at any severity"
+ *   carve-out for denylist/internal-email/compliance-code): `private-key-header`
+ *   and every operator pattern (`denylist[N]`) cannot be marked away. A PEM
+ *   private-key header is never a false positive — if it's present, it's a
+ *   real key, and the fix is removing it, not annotating it. An operator
+ *   pattern is this repo's own denylist tier; the SOP is explicit that
+ *   denylist findings resolve only via a carve-out in the private source,
+ *   never an inline annotation, and a local marker capable of suppressing an
+ *   organisation's confidential term would be exactly the security hole that
+ *   rule exists to prevent. Naming either still blocks the finding and prints
+ *   `leak-check-allow-unsupported`.
+ *
  * Exit codes: 0 = clean, 1 = findings, 2 = usage/configuration error.
  */
 
@@ -79,6 +132,12 @@ interface Rule {
   re: RegExp;
   /** Optional second-stage check; receives the match. Return false to drop it. */
   accept?: (m: RegExpExecArray) => boolean;
+  /**
+   * Defaults to true. false means `leak-check:allow <rule> — <reason>` can
+   * never suppress a finding for this rule — see the NON-EXEMPTABLE RULES
+   * note in the file header.
+   */
+  exemptable?: boolean;
 }
 
 /**
@@ -90,6 +149,8 @@ const RULES: Rule[] = [
   {
     name: "private-key-header",
     re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/,
+    // Never a false positive — see the NON-EXEMPTABLE RULES note above.
+    exemptable: false,
   },
   {
     name: "anthropic-api-key",
@@ -110,9 +171,26 @@ const RULES: Rule[] = [
   {
     name: "credential-assignment",
     // key = value / key: value, where key names a credential and value is not a
-    // placeholder or an environment/CI expression.
-    re: /\b(?:pass(?:word|wd)|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)\b\s*[:=]\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s"'#,;]+))/i,
-    accept: (m) => !isPlaceholder(m[1] ?? m[2] ?? m[3] ?? ""),
+    // placeholder, an environment/CI expression, or (unquoted only — see
+    // looksLikeCodeExpression) a code expression.
+    // The unquoted branch's stop-set includes a backtick: markdown wraps code
+    // in `single backticks`, and without this a value like `token:
+    // someObject.token` (inline-code, no space before the closing backtick)
+    // captured the backtick itself as part of the value. That trailing
+    // backtick broke looksLikeCodeExpression's end-anchored match — the
+    // exact false positive this rule exists to fix, now tripping on this
+    // file's own header prose (compass-core#31, review on #33).
+    re: /\b(?:pass(?:word|wd)|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)\b\s*[:=]\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s"'#,;`]+))/i,
+    accept: (m) => {
+      // A quoted value is a string literal by construction: quoting must
+      // never launder a real credential past this check, so the code-
+      // expression carve-out below applies ONLY to the unquoted branch.
+      const quoted = m[1] ?? m[2];
+      if (quoted !== undefined) return !isPlaceholder(quoted);
+      const raw = m[3] ?? "";
+      if (isPlaceholder(raw)) return false;
+      return !looksLikeCodeExpression(raw);
+    },
   },
 ];
 
@@ -140,10 +218,75 @@ function isPlaceholder(value: string): boolean {
   return false;
 }
 
+/**
+ * A value is "provably code, not a literal" when it has JS/TS syntax that no
+ * hand-typed credential would ever have: a member-expression or call chain
+ * (`a.b`, `f(x)`, `a.b.getToken().value`), an object/array literal, or a
+ * spread. See the CODE EXPRESSIONS ARE NOT CREDENTIALS note in the file
+ * header for why, and for the (deliberate) limit that this applies only to
+ * UNQUOTED values — `credential-assignment`'s `accept` callback is what
+ * enforces that limit, not this function.
+ *
+ * The object/array/spread branches below are redundant with `isPlaceholder`'s
+ * leading-bracket check today (both reject a value starting with `{`/`[`) —
+ * kept anyway, and documented as such, so this function states the full
+ * "provably code" contract on its own rather than depending on an unrelated
+ * function's ordering to hold half of it.
+ */
+function looksLikeCodeExpression(value: string): boolean {
+  const v = value.trim();
+  if (v.length === 0) return false;
+  if (v.startsWith("...")) return true; // spread: ...base
+  if (/^\{[\s\S]*\}$/.test(v)) return true; // object literal: {a, b}
+  if (/^\[[\s\S]*\]$/.test(v)) return true; // array literal: [a, b]
+
+  const ident = "[A-Za-z_$][\\w$]*";
+  const chain = `${ident}(?:\\.${ident})*`; // a, a.b, a.b.c
+  // A call expression, optionally chained further: f(x), a.b.f(x).c, f().g
+  const call = new RegExp(`^${chain}\\([^()]*\\)(?:\\.${ident}(?:\\([^()]*\\))?)*$`);
+  // A member expression with no call at all: a.b, a.b.c
+  const member = new RegExp(`^${chain}(?:\\.${ident})+$`);
+  return call.test(v) || member.test(v);
+}
+
+/**
+ * Per-line sanctioned false-positive marker — mirrors `gate:allow`
+ * (sops/confidentiality-gate.md §4a). See the SANCTIONED FALSE-POSITIVE
+ * ESCAPE note in the file header for the full contract.
+ */
+const ALLOW_MARKER_RE = /leak-check:allow\s+(\S+)(?:\s*(?:—|--)\s*(.+))?\s*$/;
+
+/** True when a "reason" is nothing but punctuation/whitespace — §4a: "Punctuation-only reasons don't count." */
+function isPunctuationOnlyReason(s: string): boolean {
+  return !/[A-Za-z0-9]/.test(s);
+}
+
+interface AllowMarker {
+  /** The rule name as written on the line — compared case-insensitively. */
+  rule: string;
+  /** null when absent or punctuation-only: a bare marker suppresses nothing. */
+  reason: string | null;
+}
+
+function parseAllowMarker(line: string): AllowMarker | null {
+  const m = ALLOW_MARKER_RE.exec(line);
+  if (!m) return null;
+  const rawReason = m[2]?.trim() ?? "";
+  const reason = rawReason.length > 0 && !isPunctuationOnlyReason(rawReason) ? rawReason : null;
+  return { rule: m[1]!, reason };
+}
+
 interface Finding {
   display: string;
   line: number;
   rule: string;
+}
+
+interface Exemption {
+  display: string;
+  line: number;
+  rule: string;
+  reason: string;
 }
 
 /**
@@ -204,7 +347,11 @@ if (patternsPath && existsSync(patternsPath) && statSync(patternsPath).isFile())
     index++;
     try {
       // Case-insensitive: a confidential term is confidential in any casing.
-      operatorRules.push({ name: `denylist[${index}]`, re: new RegExp(line, "i") });
+      // Not exemptable — see the NON-EXEMPTABLE RULES note in the file header:
+      // an operator pattern IS this repo's denylist tier, and the SOP is
+      // explicit that denylist findings resolve only in the private source,
+      // never via an inline annotation in the (public) repo the pattern fired in.
+      operatorRules.push({ name: `denylist[${index}]`, re: new RegExp(line, "i"), exemptable: false });
     } catch {
       // Fail closed, and never echo the pattern — it may itself be the secret.
       console.error(
@@ -352,16 +499,42 @@ function pathTargets(paths: string[]): Target[] {
 const targets = values.staged ? stagedTargets() : pathTargets(positionals);
 
 const findings: Finding[] = [];
+const exemptions: Exemption[] = [];
+const warnings: string[] = [];
+
 for (const target of targets) {
   const lines = target.text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (line.length === 0) continue;
+
+    // Computed once per line — it doesn't depend on which rule fired, only
+    // on which rule (if any) the marker names.
+    const marker = parseAllowMarker(line);
+
     for (const rule of allRules) {
       // Fresh exec per line; no /g state to carry between lines.
       const m = rule.re.exec(line);
       if (!m) continue;
       if (rule.accept && !rule.accept(m)) continue;
+
+      // A marker suppresses ONLY the rule it names, on the line it sits on —
+      // a different rule's finding sharing that line is untouched.
+      if (marker && marker.rule.toLowerCase() === rule.name.toLowerCase()) {
+        if (rule.exemptable === false) {
+          warnings.push(
+            `${target.display}:${i + 1}: ${rule.name} is not exemptable via leak-check:allow — finding still blocks (leak-check-allow-unsupported)`,
+          );
+        } else if (marker.reason) {
+          exemptions.push({ display: target.display, line: i + 1, rule: rule.name, reason: marker.reason });
+          continue; // suppressed — not added to findings
+        } else {
+          warnings.push(
+            `${target.display}:${i + 1}: leak-check:allow ${rule.name} — marker present without a reason; finding still blocks (leak-check-allow-unjustified)`,
+          );
+        }
+      }
+
       findings.push({ display: target.display, line: i + 1, rule: rule.name });
     }
   }
@@ -376,9 +549,21 @@ const skipParts: string[] = [];
 if (skipped > 0) skipParts.push(`${skipped} binary/oversize file(s) NOT scanned`);
 if (skippedSymlinks > 0) skipParts.push(`${skippedSymlinks} symlink(s) NOT followed`);
 const skipNote = skipParts.length > 0 ? `, ${skipParts.join(", ")}` : "";
+const exemptionNote = exemptions.length > 0 ? `, ${exemptions.length} exemption(s) honoured` : "";
+
+// Warnings and honoured exemptions are printed up front, independent of the
+// overall pass/fail outcome — §4a: "Visible, never silent."
+for (const w of warnings) {
+  console.error(`leak-check: ${w}`);
+}
+for (const e of exemptions) {
+  console.error(`[EXEMPT] ${e.display}:${e.line}: ${e.rule} — ${e.reason}`);
+}
 
 if (findings.length === 0) {
-  console.log(`leak-check: clean — ${targets.length} file(s) scanned${skipNote}, ${ruleSummary} active.`);
+  console.log(
+    `leak-check: clean — ${targets.length} file(s) scanned${skipNote}${exemptionNote}, ${ruleSummary} active.`,
+  );
   process.exit(EXIT_CLEAN);
 }
 
@@ -389,6 +574,6 @@ for (const f of findings) {
 console.error(
   `\nleak-check: ${findings.length} finding(s) in ${files.size} file(s) — matched content withheld by design.`,
 );
-console.error(`Scanned ${targets.length} file(s)${skipNote} with ${ruleSummary}.`);
+console.error(`Scanned ${targets.length} file(s)${skipNote}${exemptionNote} with ${ruleSummary}.`);
 console.error("Open each location yourself. Do not paste the matched text into a PR, an issue, or a chat.");
 process.exit(EXIT_FINDINGS);

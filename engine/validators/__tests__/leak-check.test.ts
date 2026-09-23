@@ -344,3 +344,205 @@ describe("leak-check.ts — --staged", () => {
     expect(r.exitCode).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #31 — credential-assignment flags code expressions, and there was no
+// sanctioned way to mark a false positive.
+//
+// Test names carry the "[watched]" tag for the cases that were observed RED
+// against origin/main before the fix (captured in the PR body) and are
+// expected GREEN after it. The un-tagged tests in this section are regression
+// guards: behaviour that was already correct and must stay that way.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — issue #31: code-expression values are not credentials", () => {
+  test("[watched] token: ZERO_REPORTS().token — a call-expression value is not flagged", () => {
+    const f = write("zero-reports.ts", "const cfg = {\n  token: ZERO_REPORTS().token,\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("[watched] token: zeroReports.token — a member-expression value is not flagged", () => {
+    const f = write("member.ts", "const cfg = {\n  token: zeroReports.token,\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("[watched] token: computeTally(x) — a call-expression value is not flagged", () => {
+    const f = write("call.ts", "const cfg = {\n  token: computeTally(x),\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("an object-literal value is not flagged", () => {
+    const f = write("obj.ts", "const cfg = {\n  secret: {kind: 'ref', id: x},\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("an array-literal value is not flagged", () => {
+    const f = write("arr.ts", "const cfg = {\n  token: [a, b, c],\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a spread value is not flagged", () => {
+    const f = write("spread.ts", "const cfg = {\n  secret: {...base},\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a chained member/call expression is not flagged", () => {
+    const f = write("chain.ts", "const cfg = {\n  token: a.b.getToken().value,\n};\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a quoted ghp_-shaped literal in a token: field is still flagged (not a code expression)", () => {
+    // Fragments, not a literal secret — see the file header note.
+    const ghpLike = "gh" + "p_" + "Q9zQ".repeat(9);
+    const f = write("quoted.ts", `token: "${ghpLike}"\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/quoted\.ts:1: (credential-assignment|github-token)/);
+  });
+
+  test("a bare 40-char token value is still flagged", () => {
+    const bareToken = "Qx7f".repeat(10); // 40 chars, no dots/parens/brackets
+    const f = write("bare-token.ts", `token: ${bareToken}\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("bare-token.ts:1: credential-assignment");
+  });
+
+  test("a dotted value that is NOT a clean identifier chain (trailing garbage) is still flagged", () => {
+    // Guards against the code-expression carve-out being so loose it eats a
+    // real secret that merely happens to contain a dot.
+    const f = write("dotty.ts", "secret: not.actually.code!!!garbage\n"); // leak-check:allow credential-assignment — synthetic fixture proving the rule still fires on a dotted value that is NOT a clean code-expression chain; not a real secret
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("dotty.ts:1: credential-assignment");
+  });
+
+  // PR #33 review (compass-core#31): a member-expression value written as
+  // markdown inline code — `token: someObject.token` with no space before the
+  // closing backtick — captured the backtick as part of the unquoted value.
+  // That trailing backtick broke the end-anchored code-expression match, so
+  // the false positive this issue exists to fix reappeared inside this very
+  // file's own header prose. Exact line from the review comment, verbatim.
+  test("[watched] a member expression inside markdown inline code is not flagged (backtick is not part of the value)", () => {
+    const f = write(
+      "doc.md",
+      "- leak-check `credential-assignment` on `token: someObject.token` — (b) detector corrected\n",
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a backtick-terminated unquoted value does not swallow the backtick into the captured value", () => {
+    // Same shape, minimal: nothing after the code span on the line.
+    const f = write("inline.md", "see `token: computeTally(x)` for details\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a real credential immediately followed by a backtick is still flagged", () => {
+    // The backtick stop-character must not create a NEW way to hide a real
+    // secret — only the code-expression shape is exempted, not "anything
+    // followed by a backtick".
+    const f = write("inline2.md", `\`token: my${FAKE.credential}\` — not code\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("inline2.md:1: credential-assignment");
+  });
+});
+
+describe("leak-check.ts — issue #31: leak-check:allow exemption marker", () => {
+  test("[watched] a marker with a reason suppresses the finding, and the honoured count prints", () => {
+    const f = write(
+      "allowed.ts",
+      `secret: my${FAKE.credential} // leak-check:allow credential-assignment — synthetic fixture value, used only in this test\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+    // The raw finding line must be gone...
+    expect(r.output).not.toMatch(/allowed\.ts:1: credential-assignment\s*$/m);
+    // ...but the exemption itself is visible, never silent.
+    expect(r.output).toContain("1 exemption(s) honoured");
+    // Never echo the matched credential value itself.
+    expect(r.output).not.toContain(FAKE.credential);
+  });
+
+  test("[watched] a bare marker with no reason still blocks and warns", () => {
+    const f = write("bare-marker.ts", `secret: my${FAKE.credential} // leak-check:allow credential-assignment\n`);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("bare-marker.ts:1: credential-assignment");
+    expect(r.output.toLowerCase()).toContain("without a reason");
+    expect(r.output).not.toContain("exemption(s) honoured"); // no honoured exemption
+  });
+
+  test("a punctuation-only reason does not count as a reason", () => {
+    const f = write(
+      "punct-reason.ts",
+      `secret: my${FAKE.credential} // leak-check:allow credential-assignment — ---\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("punct-reason.ts:1: credential-assignment");
+  });
+
+  test("[watched] a non-exemptable rule (private-key-header) still blocks even with a marker and reason", () => {
+    const f = write(
+      "key.ts",
+      `${FAKE.privateKeyHeader} // leak-check:allow private-key-header — this is fine, trust me\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("key.ts:1: private-key-header");
+    expect(r.output.toLowerCase()).toContain("not exemptable");
+  });
+
+  test("a marker naming a rule that did not fire on the line is a no-op", () => {
+    const f = write("noop.ts", "line one\nline two\nline three\n// leak-check:allow credential-assignment — n/a\n");
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("the marker for one rule does not suppress a different rule's finding sharing its line", () => {
+    const f = write(
+      "shared-line.ts",
+      `secret: my${FAKE.credential} id: ${FAKE.awsKeyId} // leak-check:allow credential-assignment — synthetic value only, not a real secret\n`,
+    );
+    const r = run([f]);
+    // aws-access-key-id was not named by the marker, so it must still block.
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("shared-line.ts:1: aws-access-key-id");
+    expect(r.output).not.toMatch(/shared-line\.ts:1: credential-assignment\s*$/m);
+    expect(r.output).toContain("1 exemption(s) honoured");
+  });
+
+  test("multiple honoured exemptions are all counted", () => {
+    const f = write(
+      "multi.ts",
+      [
+        `secret: my${FAKE.credential} // leak-check:allow credential-assignment — synthetic value, test only`,
+        `password: your${FAKE.credential} // leak-check:allow credential-assignment — synthetic value, test only`,
+        "",
+      ].join("\n"),
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+    expect(r.output).toContain("2 exemption(s) honoured");
+  });
+
+  test("any comment syntax carries the marker (# and <!-- -->, not just //)", () => {
+    const f = write(
+      "hash.py",
+      `secret = "${"my" + FAKE.credential}"  # leak-check:allow credential-assignment — synthetic value, test only\n`,
+    );
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+    expect(r.output).toContain("1 exemption(s) honoured");
+  });
+});
