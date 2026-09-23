@@ -1,0 +1,2 @@
+# Synthetic leak for compass-core#52 post-merge step 6 (G1 regression). Obviously fake.
+password: "not-a-real-token-step6-synthetic"
