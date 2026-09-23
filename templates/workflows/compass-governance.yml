@@ -26,6 +26,93 @@
 # the SHA, read what changed, land it in a PR like any other change. Re-running
 # the installer from a newer compass-core re-renders the pin.
 #
+# A PR CANNOT CHANGE THE WORKFLOW OR THE PIN THAT GATES IT
+# ----------------------------------------------------------
+# (the-metafactory/compass-core#41). This job runs on `pull_request_target`,
+# not `pull_request`: `pull_request_target` resolves ENTIRELY from the file as
+# it exists on the repository's DEFAULT branch — not "the PR's base branch" in
+# general (GitHub: "this event will only trigger a workflow run if the
+# workflow file exists on the default branch"; `GITHUB_SHA` for this event is
+# "the last commit on the default branch") — so every value inside it,
+# including the `ref:` on the compass-core checkout below, comes from the
+# repo's default branch, never the PR head's own copy, and never some other
+# branch a PR happens to target. A PR editing its own copy of this file,
+# including repointing the pin to an older, weaker engine, has zero effect on
+# the run that gates it. Two things follow from that, and both are applied
+# below — see GitHub's own hardening guidance for pull_request_target
+# ("Keeping your GitHub Actions and workflows secure: Preventing pull_request_target
+# workflows from accessing secrets and writing to the repository"):
+#
+#   1. This job NEVER checks out `github.event.pull_request.head.sha` (the PR
+#      author's own commits) into the default working directory, and NEVER
+#      executes anything from it. Two steps read from the PR head at all
+#      (claude-md-check, which validates the PR's OWN proposed CLAUDE.md, and
+#      leak-check, which scans the PR's OWN changed files) — both check it out
+#      to an isolated `pr-head/` directory with `persist-credentials: false`,
+#      and read paths under it as TEXT — `bun <engine path> pr-head/<file>` —
+#      never as something invoked, sourced, `bun install`'d, or given a hook
+#      to run. label-check reads no PR file at all: it only queries the
+#      GitHub API for the repo's current labels. Read the file; never run the
+#      file. A symlink under `pr-head/` whose target resolves OUTSIDE
+#      `pr-head/`, or that is dangling, is refused outright, before any
+#      validator runs (see that step) — `[ -f ]` and a bare filename argument
+#      both follow a symlink, and a PR-planted one pointing outside `pr-head/`
+#      would otherwise get its TARGET's content into a scan. An IN-TREE
+#      symlink (pointing at another file this same checkout already has) is
+#      fine and passes — see that step's own comment for why (PR #52
+#      round-2 review, G4).
+#   2. `permissions:` is the minimum this job needs — `contents: read` to
+#      check things out, `issues: read` because label-check lists the repo's
+#      labels. Nothing here writes to the repository, comments on the PR, or
+#      needs any other scope, and pull_request_target's ambient token is
+#      privileged enough that an unused scope left in is a real difference,
+#      not a formality.
+#
+# THIS JOB USES THE PLAIN, DEFAULT `pull_request_target` TRIGGER — NO
+# `types:` OVERRIDE, NO JOB-LEVEL `if:` ON THE EVENT ACTION
+# ----------------------------------------------------------------------
+# (PR #52 round-2 review, G1 — read this before "helpfully" adding either
+# back.) An earlier revision added `types: [..., labeled, unlabeled]` here
+# so that adding the `pin-bump` label would re-run the pin check, and then
+# skipped THIS job on a pure label event with `if: github.event.action !=
+# 'labeled' && ...` on the theory that a label never changes a file, so
+# governance would produce the same result either way. That reasoning was
+# wrong in a way that mattered: GitHub reports a SKIPPED job's status as
+# "Success", and a required check reporting success does not block a merge
+# — regardless of what an EARLIER run on the same commit said. A PR with a
+# real, planted leak would show `governance` red; adding any label started a
+# new run where `governance` was skipped and therefore green; the newest
+# `governance` check on that commit was the skipped one; the PR would merge.
+# That is a strictly worse hole than the one #41 closes.
+#
+# The fix is structural, not a smarter condition: the pin check that
+# actually needs to react to `labeled`/`unlabeled` now lives in its own
+# workflow file, `compass-pin-check.yml` (see that file's own header) — the
+# ONLY workflow with those types in its trigger. This file goes back to
+# plain `pull_request_target` (opened/synchronize/reopened, GitHub's
+# default), so a label event never starts a new `governance` run at all,
+# and there is no skipped "successful" governance for a red one to lose a
+# race against.
+#
+# A CONSEQUENCE WORTH SAYING OUT LOUD, AND WHERE IT STOPS: under
+# `pull_request`, a fork PR never saw a token with any real reach.
+# `pull_request_target` hands every PR — fork or not — the SAME job context
+# as a same-repo PR, including whatever secrets this workflow's `env:`
+# blocks reference (this repo's own secrets today: `ECOSYSTEM_PAT`, plus
+# `CONFIDENTIALITY_DENYLIST` if wired — see below). That is unavoidable and
+# is the whole point of the event; `permissions:` above only scopes the
+# ambient GITHUB_TOKEN, not the secrets context. What IS withheld from a
+# fork PR, deliberately, is the confidentiality denylist specifically: the
+# leak-check step's `env:` sets `DENYLIST` to the secret only when
+# `head.repo.full_name == github.repository`, and to the empty string
+# otherwise (see that step). That is the one thing this workflow does to
+# narrow what a fork PR's job can see beyond the trigger's own default —
+# not a blanket "forks get no secrets" claim, which would be false and has
+# been the source of two review rounds' worth of false statements in this
+# file. See sops/confidentiality-gate.md §5 for the local-gate step a
+# maintainer still owes a fork PR before merging (that MUST is about a
+# DEGRADED scan, not this oracle — see that file's own §0).
+#
 # CONFIDENTIALITY_DENYLIST_FILE — READ THIS BEFORE WIRING THE SECRET
 # -------------------------------------------------------------------
 # The scanner's variable was renamed from CONFIDENTIALITY_DENYLIST, which is
@@ -56,10 +143,11 @@
 #
 # Arm the local hook once per clone:  git config core.hooksPath .githooks
 #
-# Secrets are not exposed to fork PRs, so a fork run is always built-ins-only —
-# see sops/confidentiality-gate.md §5 for the local-gate step a maintainer owes
-# a fork PR before merging. That is also why --require-patterns is applied only
-# when a denylist is actually available: a fork PR must run reduced, not fail.
+# The denylist secret specifically is withheld from a fork PR (see the
+# leak-check step's `env:` above and in that step) — that's the only reason
+# --require-patterns is conditional at all: a fork run must run reduced
+# (shape-pattern rules only), never fail outright for lacking a secret it was
+# never going to get.
 #
 # Actions and the engine checkout are pinned by commit SHA, not tag. A tag is
 # mutable; a security gate that a consumer copies should not be re-pointable by
@@ -68,7 +156,7 @@
 name: compass governance
 
 on:
-  pull_request:
+  pull_request_target:
 
 permissions:
   contents: read
@@ -77,12 +165,71 @@ permissions:
 jobs:
   governance:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
     steps:
-      - name: Check out the repo being gated
+      # GIT PLUMBING ONLY — computing the PR's changed-file list needs both
+      # commits' objects in one clone. persist-credentials: false, same as
+      # every other checkout here; the one command that needs to authenticate
+      # (the fetch below, for a private repo) supplies the token itself, for
+      # that command only, rather than leaving it sitting in base/.git/config
+      # for the rest of the job (PR #52 review, F10) — see the leak-check
+      # step for why that specific detail matters (a symlink planted under
+      # pr-head/ must never be able to read a persisted credential out of
+      # this checkout).
+      - name: Check out the default branch (git history only, for the diff below)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Full history: the leak-check step needs the merge-base of the PR.
+          path: base
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the PR head as DATA ONLY (never executed)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-head
+          persist-credentials: false
+
+      - name: Refuse a pr-head/ symlink that points outside pr-head/, or is dangling
+        # A symlink INSIDE pr-head/ that stays inside pr-head/ and resolves to
+        # something real (e.g. a PR's own `CLAUDE.md -> AGENTS.md`) is
+        # ordinary repo content and must pass — refusing every symlink,
+        # unconditionally, would put every PR in a repo that legitimately
+        # uses one permanently red (PR #52 round-2 review, G4). What has to
+        # be refused is specifically a link that ESCAPES pr-head/ (so a read
+        # below resolves to a file this checkout never meant to expose — e.g.
+        # base/.git/config, a runner temp file) or that resolves to nothing
+        # at all (a link a PR points at a path this checkout is ABOUT to
+        # create, timed to land between this check and a later step).
+        # `find -type l` matches a symlinked file OR a symlinked directory,
+        # and does not follow it to look inside (PR #52 review, F10) — so a
+        # directory symlink pointing out of pr-head/ is caught the same way,
+        # without this step ever descending into whatever it points at.
+        run: |
+          set -euo pipefail
+          PR_HEAD_ABS=$(realpath pr-head)
+          BAD=0
+          while IFS= read -r -d '' link; do
+            target=$(realpath -m "$link")
+            case "$target" in
+              "$PR_HEAD_ABS"/*) ;; # in-tree so far — still need the existence check below
+              *)
+                echo "::error::pr-head/ symlink escapes the checkout: $(printf '%s' "$link" | tr -d '\n\r') -> $(printf '%s' "$target" | tr -d '\n\r')"
+                BAD=1
+                continue
+                ;;
+            esac
+            if [ ! -e "$target" ]; then
+              echo "::error::pr-head/ symlink is dangling (target does not exist): $(printf '%s' "$link" | tr -d '\n\r') -> $(printf '%s' "$target" | tr -d '\n\r')"
+              BAD=1
+            fi
+          done < <(find pr-head -type l -print0)
+          if [ "$BAD" = "1" ]; then
+            echo "::error::refusing to scan pr-head/ — this workflow only ever reads pr-head/ as plain file data, never resolving a link outside it."
+            exit 1
+          fi
 
       - name: Check out the compass-core engine
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -98,62 +245,133 @@ jobs:
         working-directory: .compass-engine
         run: bun install --frozen-lockfile
 
+      - name: Require base/compass.config.yaml to exist (fail loudly, never fall back)
+        # PR #52 round-2 review, G5: claude-md-check and label-check below
+        # are told to read base/compass.config.yaml, but the shared config
+        # loader (engine/lib/config.ts) treats a missing --config/COMPASS_CONFIG
+        # path as "not given" and falls back to discovering ANY
+        # compass.config.yaml — including one it finds by walking up from
+        # pr-head/CLAUDE.md, i.e. the PR's own copy, the exact file a PR
+        # could edit to turn off its own required_sections or
+        # enforce_required. That fallback exists for legitimate bare
+        # invocations elsewhere in this engine and isn't being changed here;
+        # instead, this step makes "base/compass.config.yaml is missing" a
+        # hard, loud failure before either validator runs, so there's no
+        # silent path from "the trusted config is absent" to "the PR's own
+        # config was used instead".
+        run: |
+          if [ ! -f base/compass.config.yaml ]; then
+            echo "::error::base/compass.config.yaml is missing from the default branch's checkout. Refusing to run claude-md-check/label-check: without this file, the config loader would fall back to discovering compass.config.yaml elsewhere — including the PR's own copy — and a PR must never be able to supply the config that governs its own checks."
+            exit 1
+          fi
+
       - name: claude-md-check
-        run: bun .compass-engine/engine/validators/claude-md-check.ts CLAUDE.md
+        # The FILE is the PR's own proposed CLAUDE.md (pr-head/) — that's the
+        # point, checking what the PR proposes. The CONFIG is base/'s, not
+        # pr-head/'s (PR #52 review, F5): required_sections lives in
+        # compass.config.yaml, and reading that from pr-head/ would let a PR
+        # turn off its own CLAUDE.md requirements in the same diff that
+        # violates them. COMPASS_CONFIG is set alongside --config (round-2
+        # review, G5): the previous step already guarantees the path exists,
+        # so this is belt-and-suspenders against a future refactor that drops
+        # --config but forgets the env var, not a behaviour change on its own.
+        env:
+          COMPASS_CONFIG: base/compass.config.yaml
+        run: |
+          bun .compass-engine/engine/validators/claude-md-check.ts pr-head/CLAUDE.md \
+            --config base/compass.config.yaml
 
       - name: label-check
+        # Reads no PR file at all — repo labels come from the GitHub API, and
+        # (PR #52 review, F5) the required-label list comes from base/'s
+        # compass.config.yaml, not the PR's own, for the same reason as
+        # claude-md-check above: validators.label_check.enforce_required is a
+        # gate a PR must not be able to switch off on itself.
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bun .compass-engine/engine/validators/label-check.ts "${{ github.repository }}"
+          COMPASS_CONFIG: base/compass.config.yaml
+        run: |
+          bun .compass-engine/engine/validators/label-check.ts "${{ github.repository }}" \
+            --config base/compass.config.yaml
 
       - name: leak-check (changed files)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          DENYLIST: ${{ secrets.CONFIDENTIALITY_DENYLIST }}
+          GH_TOKEN: ${{ github.token }}
+          # Andreas ruled (2026-09-24, PR #52 review F4): withhold the
+          # denylist from a fork PR. This repo is public, so its Actions logs
+          # are public; leak-check prints `file:line: denylist[i]` per hit,
+          # which would otherwise let ANY GitHub user open a fork PR with one
+          # guessed term per line and read back, line by line, which guesses
+          # are on the confidential list — a fork PR never gets code executed
+          # here (nothing from pr-head/ runs), so that oracle is the actual
+          # residual risk pull_request_target introduces, and this is where
+          # it's closed. Gated in `env:`, not inside the script below, so
+          # there's no script-level branch to bypass: a fork run's DENYLIST
+          # is the empty string before leak-check.ts ever starts. This is the
+          # ONLY thing pull_request_target withholds from a fork PR here —
+          # see the file header's "A CONSEQUENCE WORTH SAYING OUT LOUD" note;
+          # every OTHER secret this workflow might reference is available to
+          # a fork PR's job the same as a same-repo one's.
+          DENYLIST: ${{ github.event.pull_request.head.repo.full_name == github.repository && secrets.CONFIDENTIALITY_DENYLIST || '' }}
         run: |
           set -euo pipefail
 
-          # --require-patterns only when a denylist is actually reachable. A fork
-          # PR gets no secrets by design and must run reduced, not fail; a
-          # non-fork run that HAS the secret must refuse to run degraded.
+          # --require-patterns only when a denylist is actually reachable —
+          # unchanged from before pull_request_target: a fork PR still runs
+          # shape-pattern (built-in) rules only, exactly as it did under plain
+          # pull_request, because the secret above is withheld from it either way.
           REQUIRE=""
           if [ -n "$DENYLIST" ]; then
             printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
             export CONFIDENTIALITY_DENYLIST_FILE="$RUNNER_TEMP/denylist.txt"
             REQUIRE="--require-patterns"
           else
-            echo "::notice::No denylist secret available to this run (fork PR, or the secret is not wired) — built-in rules only."
+            echo "::notice::No denylist available to this run (fork PR, or the secret is not wired) — built-in rules only."
           fi
 
-          # Diff from the MERGE-BASE, not the base branch tip. The checkout is the
-          # merge commit, so its files include whatever main has merged in; a
-          # two-dot diff against the base tip lists files only main touched and
-          # fails the PR on somebody else's leak.
-          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          # Both commits' objects have to exist in ONE repo to diff them.
+          # base/ has persist-credentials: false (see its checkout step
+          # above); this fetch supplies the token itself, scoped to this one
+          # git invocation via a throwaway http.extraheader, rather than
+          # leaving a credential helper configured in base/.git/config for
+          # the rest of the job. Needed for a private repo; harmless for a
+          # public one.
+          git -C base -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf '%s' "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')" \
+            fetch --no-tags origin "$HEAD_SHA"
 
           # --no-renames + R in the filter, deliberately, and both are load-
           # carrying: without them a rename-plus-edit is reported as a single R
           # entry, ACM drops it, and the renamed file — secret and all — is never
           # scanned. Verified: git mv + append a credential produces an EMPTY
           # ACM listing.
-          git diff --no-renames --name-only --diff-filter=ACMR -z \
-            "$MERGE_BASE" "$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          git -C base diff --no-renames --name-only --diff-filter=ACMR -z \
+            "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
 
-          # The list names paths as the PR HEAD has them, but the checkout on disk
-          # is the MERGE commit. A file the PR added and the base branch then
-          # deleted is listed and absent — and absent from the merged result too,
-          # so there is nothing to scan and nothing at risk. Drop those, loudly:
-          # leak-check treats a missing path as a usage error, on purpose.
-          # The engine checkout is skipped for the same reason it exists: it is
-          # compass-core's files, not this PR's changes.
+          # Paths are relative to pr-head/, which is exactly where the PR's
+          # own file contents live — no merge commit to reconstruct, no
+          # separate "is it in the merged tree" check: the PR head IS the
+          # tree being scanned. No .compass-engine/* skip here (PR #52
+          # review, F6): that case existed when the engine used to be checked
+          # out INSIDE the gated tree; the PR tree now lives entirely under
+          # pr-head/, so ".compass-engine/..." in this diff can only ever be
+          # a path the PR itself authored, and skipping it would exempt
+          # exactly the PR-controlled files an attacker would pick to hide
+          # something behind a name that used to mean "not PR content".
           : > "$RUNNER_TEMP/scan.txt"
           while IFS= read -r -d '' f; do
-            case "$f" in .compass-engine/*) continue ;; esac
-            if [ -f "$f" ]; then
-              printf '%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
+            if [ -f "pr-head/$f" ]; then
+              printf 'pr-head/%s\0' "$f" >> "$RUNNER_TEMP/scan.txt"
             else
-              echo "::notice::$f is in the PR diff but not in the merged tree — not scanned."
+              # $f is PR-controlled (a path from the PR's own diff) — strip
+              # any newline/carriage-return before it reaches a workflow
+              # command, so a filename crafted to contain one can't inject a
+              # fake `::error::`/`::stop-commands::` line into this log
+              # (PR #52 review, F11; cosmetic, not a secrets or execution
+              # issue, fixed anyway since it's one `tr` away).
+              safe_f=$(printf '%s' "$f" | tr -d '\n\r')
+              echo "::notice::$safe_f is in the PR diff but not present at the PR head — not scanned."
             fi
           done < "$RUNNER_TEMP/changed.txt"
 

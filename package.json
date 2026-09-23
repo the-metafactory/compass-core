@@ -9,6 +9,7 @@
     "validate:claude-md": "bun engine/validators/claude-md-check.ts",
     "validate:labels": "bun engine/validators/label-check.ts",
     "validate:leak": "bun engine/validators/leak-check.ts",
+    "validate:pin": "bun engine/validators/pin-check.ts",
     "validate:all": "bun engine/ci/run-all.ts"
   },
   "dependencies": {

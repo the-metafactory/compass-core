@@ -49,8 +49,20 @@ SOP: confidentiality-gate | Action: {engagement-open|sync|burn-in|enforce|fp|for
     *all repositories* makes the gate work everywhere and widens who can read the payload;
     scoping to *selected repositories* is tighter and needs upkeep as repos are added. Pick one
     deliberately — the hashing posture in §2 depends on which you chose.
-  - **Fork coverage.** Secrets are not exposed to fork PRs, so the CI gate runs **shape-pattern
-    tiers only** there. A maintainer MUST run the local gate before merging any fork PR (§5).
+  - **Fork coverage.** Depends on the gate's trigger. On plain `pull_request`, a fork job genuinely
+    gets no secrets at all, so the CI gate runs **shape-pattern tiers only** there. On
+    `pull_request_target` (compass-governance.yml, compass-core#41) a fork job's secrets context
+    IS available — same as a same-repo PR's — because that's what the trigger is for; do not read
+    "fork coverage" as "forks get no secrets" for a gate on this trigger. What's actually withheld
+    from a fork PR there is the denylist secret specifically, by an explicit `env:` condition on
+    the leak-check step (`head.repo.full_name == github.repository`), not by the trigger. That
+    condition is what stops a fork PR from using an unconditional `secrets.CONFIDENTIALITY_DENYLIST`
+    as a one-guess-per-line oracle against the denylist (leak-check prints `file:line: denylist[i]`
+    per hit, into this public repo's public Actions logs) — the `env:` condition prevents the
+    oracle. A maintainer MUST still run the local gate before merging any fork PR (§5): that MUST
+    is about the DIFFERENT problem of a fork PR's CI run being intentionally reduced (denylist
+    withheld, shape-pattern rules only) whichever trigger gates it — the local gate is what covers
+    the denylist tier a fork PR's own CI run never gets to run at all.
 
 ---
 
