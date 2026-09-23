@@ -610,35 +610,55 @@ const RULES: Rule[] = [
 // a base64url/digit-bearing/underscore-joined tail never satisfies "two more
 // all-letter hyphen segments" by chance.
 //
-// PHRASE-HEAD SET WIDENED FROM `not`/`should`/`never` TO EVERY WHOLE-VALUE
-// PLACEHOLDER WORD (review on #46, N4): the factory scan turned up a
-// fixture whose quoted `*_token` value is a hyphenated, all-caps, five-word
-// phrase that labels itself a placeholder — it contains "example", "not",
-// "redacted" and "token" — but its FIRST word is "redacted", and `redacted`
-// was accepted only as a whole value (`^redacted$`), not as a phrase head.
-// A `leak-check:allow` marker can't fix this: it's line-scoped and needs a
-// comment, and JSON has no comment syntax, so the only way to attach one
-// would be editing the fixture's value or structure — a change made only to
-// pass the detector, which sops/confidentiality-gate.md and this repo's own
-// #30/#33 precedent refuse. The right fix is the detector: `redacted` (and
-// every other single-word placeholder already recognised as a whole value —
-// `placeholder`, `unset`, `dummy`, `test`, `todo`, `tbd`, `none`, `null`,
-// `nil`, `true`, `false`, `undefined`, `empty`, `secret`, `password`,
-// `token`, alongside the existing `not`/`should`/`never`) is now ALSO a
-// valid phrase head, case-insensitively, under the same "two or more
-// all-letter hyphenated words follow" shape. This passes the same test
-// `not`/`should`/`never` passed on #42 review: no accidental real secret is
-// a grammatical, multi-word, all-letter hyphenated English phrase that
-// happens to start with one of these words — a base64url/digit-bearing/
-// underscore-joined tail never satisfies "two more all-letter hyphen
-// segments" by chance, exactly as already true for `not`/`should`/`never`.
-// PLACEHOLDER_PHRASE_HEAD deliberately excludes the punctuation-repeat
-// entries (`x+`, `*+`, `.+`, `-+`, `_+`) — not word-shaped, so "a phrase
-// starting with one of these" isn't a coherent idea — and the
-// `change[-_ ]?me` entry, which already has its own internal separator
-// shape and isn't a plain word literal.
-const PLACEHOLDER_PHRASE_HEAD =
-  "(?:redacted|placeholder|unset|dummy|test|todo|tbd|none|null|nil|true|false|undefined|empty|secret|password|token|not|should|never)";
+// PHRASE-HEAD SET WIDENED FROM `not`/`should`/`never` TO `redacted`/
+// `placeholder`/`todo`/`tbd` ONLY (review on #46, N4, tightened on the
+// following review's B3 after a first cut over-widened it — see below):
+// the factory scan turned up a fixture whose quoted `*_token` value is a
+// hyphenated, all-caps, five-word phrase that labels itself a placeholder —
+// it contains "example", "not", "redacted" and "token" — but its FIRST
+// word is "redacted", and `redacted` was accepted only as a whole value
+// (`^redacted$`), not as a phrase head. A `leak-check:allow` marker can't
+// fix this: it's line-scoped and needs a comment, and JSON has no comment
+// syntax, so the only way to attach one would be editing the fixture's
+// value or structure — a change made only to pass the detector, which
+// sops/confidentiality-gate.md and this repo's own #30/#33 precedent
+// refuse. The right fix is the detector: `redacted` (and `placeholder`,
+// `todo`, `tbd` — words that name the ANNOTATION itself, not the secret) is
+// now ALSO a valid phrase head, case-insensitively, under the same "two or
+// more all-letter hyphenated words follow" shape already used for
+// `not`/`should`/`never`.
+//
+// B3 — WHY THE HEAD SET IS EXACTLY THIS SHORT, AND NOT EVERY WHOLE-VALUE
+// PLACEHOLDER WORD: the first cut of this widening (round 3) added every
+// single-word placeholder on the list below — including `password`,
+// `secret`, `token`, `test`, `true`, `none`, `empty` — as phrase heads too.
+// Review on #46, B3 found that this regressed #42 F1: a human-chosen,
+// word-only passphrase is a REALISTIC accidental leak, not a hypothetical
+// one (a password manager's word-list generator, or someone typing a
+// memorable phrase straight into a `.env`), and `password-for-prod`,
+// `secret-key-value`, `test-live-key`, `token-abc-def`, `true-blue-ocean-
+// cat`, `none-of-your-business` are exactly that shape — three or more
+// all-letter hyphenated words, no digits, no underscores — the SAME shape
+// this rule exists to recognise as a disclaimer. Unlike `not`/`should`/
+// `never`/`redacted`/`placeholder`/`todo`/`tbd`, words like `password` and
+// `secret` are not merely "a possible first word of a sentence" — they are
+// the credential's own name, or an ordinary word, and are exactly what a
+// human picks FIRST when hand-writing a real password. The claim that
+// "no accidental real secret starts with one of these words" holds for
+// `not`/`should`/`never`/`redacted`/`placeholder`/`todo`/`tbd` — nobody
+// names a real secret starting with a word that means "this is fake" or
+// "fill this in later" — and does NOT hold for `password`/`secret`/`token`/
+// `test`/`true`/`false`/`none`/`null`/`nil`/`empty`/`undefined`/`unset`/
+// `dummy`, which stay OUT of PLACEHOLDER_PHRASE_HEAD even though they
+// remain valid as a WHOLE VALUE on their own (see the bare-word alternation
+// below — `^secret$`/`^password$` alone are still placeholders; only the
+// PHRASE-HEAD use, where any two-or-more-word tail is now enough, is
+// narrower). PLACEHOLDER_PHRASE_HEAD also deliberately excludes the
+// punctuation-repeat entries (`x+`, `*+`, `.+`, `-+`, `_+`) — not
+// word-shaped, so "a phrase starting with one of these" isn't a coherent
+// idea — and the `change[-_ ]?me` entry, which already has its own internal
+// separator shape and isn't a plain word literal.
+const PLACEHOLDER_PHRASE_HEAD = "(?:redacted|placeholder|todo|tbd|not|should|never)";
 const PLACEHOLDER = new RegExp(
   "^(?:x+|\\*+|\\.+|-+|_+|change[-_ ]?me|redacted|placeholder|unset|dummy|test|todo|tbd|none|null|nil|true|false|undefined|empty|secret|password|token|" +
     "(?:your|my|sample|fake|example|dummy|replace)[-_][a-z0-9_-]*|" +

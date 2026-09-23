@@ -1566,26 +1566,61 @@ describe("leak-check.ts — #46 review B2: the quoted boundary accepts ANY non-a
 // this (line-scoped, needs a comment; JSON has no comment syntax), so
 // editing the fixture would be a change made only to pass the detector —
 // refused per this repo's own #30/#33 precedent. Fix: PLACEHOLDER_PHRASE_HEAD
-// widens the phrase-head set from `not`/`should`/`never` to every
-// single-word placeholder already recognised as a whole value, so a
-// hyphenated, 2-or-more-more-word, all-letter phrase starting with ANY of
-// them is recognised — case-insensitively — under the SAME shape
-// (`(?:-[a-z]{1,12}){2,}`) that already protected `not`/`should`/`never`
-// from swallowing a real secret or password.
+// widens the phrase-head set from `not`/`should`/`never` to also include
+// `redacted`/`placeholder`/`todo`/`tbd` — words that name the ANNOTATION
+// itself, not the secret — so a hyphenated, 2-or-more-word, all-letter
+// phrase starting with ANY of them is recognised, case-insensitively, under
+// the SAME shape (`(?:-[a-z]{1,12}){2,}`) that already protected
+// `not`/`should`/`never` from swallowing a real secret or password.
 //
-// The fixture below is a SYNTHETIC value built for this shape, not the
-// factory fixture's actual text — a different placeholder head
-// ("placeholder" itself) and a different phrase.
+// Round 3 review, B3 — the FIRST CUT of this widening went too far: it
+// added every single-word placeholder (`password`, `secret`, `token`,
+// `test`, `true`, `none`, `empty`, …) as a phrase head too, which excused
+// REAL human-chosen, word-only passphrases — `password-for-prod`,
+// `secret-key-value`, `test-live-key`, `token-abc-def`,
+// `true-blue-ocean-cat`, `none-of-your-business` — that `main` (and every
+// prior round of this PR) correctly still blocked. This is exactly the
+// #42 F1 shape ("a human-chosen password that reads as a sentence"),
+// reachable by a password generator that defaults to hyphenated word
+// lists, or a person typing a memorable phrase into a `.env` by hand.
+// PLACEHOLDER_PHRASE_HEAD is now the narrow four-plus-three-word set —
+// `redacted`/`placeholder`/`todo`/`tbd` alongside `not`/`should`/`never` —
+// and each of the six phrases above must still block, unquoted in `.env`
+// and quoted in `.json` alike (credential-assignment's placeholder check
+// doesn't distinguish the two once past the key match).
 //
-// "[watched]" against this PR's pre-round-3-review head (9c71592).
+// The two positive fixtures below are SYNTHETIC values built for this
+// shape, not the factory fixture's actual text.
+//
+// "[watched]" tests are confirmed to give the WRONG result — a positive
+// excused where it should block, i.e. exit 0 where main gives exit 1 — at
+// this PR's pre-round-4-review head (5e582c4), and correct afterward.
 // ---------------------------------------------------------------------------
 
-describe("leak-check.ts — #46 review N4: the placeholder phrase-head set covers every whole-value placeholder word", () => {
-  test('[watched] a quoted key whose value is a hyphenated ALL-CAPS phrase headed by "placeholder" is not flagged', () => {
+describe("leak-check.ts — #46 review N4: the placeholder phrase-head set covers redacted/placeholder/todo/tbd", () => {
+  test('a quoted key whose value is a hyphenated ALL-CAPS phrase headed by "placeholder" is not flagged', () => {
     const key = "api" + "_token";
     const value = "PLACEHOLDER" + "-" + "EXAMPLE" + "-" + "VALUE" + "-" + "ONLY";
     const content = "{" + quotedKV(key, value) + "}\n";
     const f = write("f46-n4-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a value headed by "redacted" (a different phrase from the factory fixture) is not flagged', () => {
+    const key = "cli" + "ent_secret";
+    const value = "redacted" + "-" + "sample" + "-" + "data" + "-" + "only";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n4-3.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a value headed by "todo" is not flagged', () => {
+    const key = "to" + "ken";
+    const value = "todo" + "-" + "fill" + "-" + "me" + "-" + "in";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n4-4.json", content);
     const r = run([f]);
     expect(r.exitCode).toBe(0);
   });
@@ -1599,5 +1634,120 @@ describe("leak-check.ts — #46 review N4: the placeholder phrase-head set cover
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain("f46-n4-2.json:1: credential-assignment");
     expect(r.output).not.toContain(FAKE.envValue);
+  });
+});
+
+describe("leak-check.ts — #46 review B3: word-only passphrases headed by an ordinary credential word still block", () => {
+  const envCases: [string, string, string][] = [
+    ["f46-b3-1.env", "DB_PASSWORD", "password" + "-" + "for" + "-" + "prod"],
+    ["f46-b3-2.env", "secret", "secret" + "-" + "key" + "-" + "value"],
+    ["f46-b3-3.env", "api_key", "test" + "-" + "live" + "-" + "key"],
+    ["f46-b3-4.env", "token", "token" + "-" + "abc" + "-" + "def"],
+    ["f46-b3-5.env", "password", "true" + "-" + "blue" + "-" + "ocean" + "-" + "cat"],
+    ["f46-b3-6.env", "secret", "none" + "-" + "of" + "-" + "your" + "-" + "business"],
+  ];
+
+  for (const [name, key, value] of envCases) {
+    test(`[watched] ${key}=<word-only phrase> in .env still blocks (${name})`, () => {
+      const content = `${key}=${value}\n`;
+      const f = write(name, content);
+      const r = run([f]);
+      expect(r.exitCode).toBe(1);
+      expect(r.output).toContain(`${name}:1: credential-assignment`);
+    });
+  }
+
+  // Coordinator's exact case (DB_PASSWORD key, a "password" + "for" + "prod"
+  // word-only phrase value), as a dedicated pin. The title below is worded
+  // to avoid writing that key/value shape contiguously — this file is
+  // itself scanned by leak-check, and that exact shape is what this test
+  // exists to make it catch.
+  test("[watched] an uppercase env-style PASSWORD key set to a word-only phrase still blocks", () => {
+    const value = "password" + "-" + "for" + "-" + "prod";
+    const content = `DB_PASSWORD=${value}\n`;
+    const f = write("f46-b3-0.env", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-0.env:1: credential-assignment");
+  });
+
+  // At least two of the six phrases, quoted, in .json — the placeholder
+  // check doesn't care whether the value arrived quoted or unquoted.
+  test("[watched] a quoted \"password-for-prod\"-shaped value in .json still blocks", () => {
+    const key = "pass" + "word";
+    const value = "password" + "-" + "for" + "-" + "prod";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-b3-7.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-7.json:1: credential-assignment");
+  });
+
+  test("[watched] a quoted \"secret-key-value\"-shaped value in .json still blocks", () => {
+    const key = "sec" + "ret";
+    const value = "secret" + "-" + "key" + "-" + "value";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-b3-8.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-8.json:1: credential-assignment");
+  });
+
+  test("[watched] an uppercase TEST-LIVE-KEY-shaped value in .env still blocks", () => {
+    const value = "TEST" + "-" + "LIVE" + "-" + "KEY";
+    const content = `api_key=${value}\n`;
+    const f = write("f46-b3-9.env", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-9.env:1: credential-assignment");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N7/N8 (review on #46 round 3) — the single-quote branch of CRED_KEY_QUOTED
+// was untested beyond a bare key (mutations M16-M18 on the `'` boundary, `'`
+// camelCase branch, and `'` prefix all survived round 3's tests), and
+// nothing pinned that the placeholder phrase needs TWO OR MORE tail words,
+// not one (M21 survived).
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #46 review N7: the single-quote branch gets the same coverage as the double-quote one", () => {
+  test("a single-quoted dotted-prefix key is flagged in .ts", () => {
+    const key = "spring" + "." + "datasource" + "." + "password";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-n7-1.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-n7-1.ts:1: credential-assignment");
+    expect(r.output).not.toContain(FAKE.envValue);
+  });
+
+  test("a single-quoted camelCase-prefixed key is flagged in .ts (pins the ' CRED_KEY_UPPER_FIRST branch)", () => {
+    const key = "refresh" + "Token";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-n7-2.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-n7-2.ts:1: credential-assignment");
+  });
+
+  test("a single-quoted \"pretoken\" key (no boundary) is not flagged in .ts", () => {
+    const key = "pre" + "token";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-n7-3.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+describe("leak-check.ts — #46 review N8: a placeholder phrase needs TWO OR MORE tail words, not one", () => {
+  test('a value that is a placeholder head plus exactly ONE tail word ("redacted-value") still blocks', () => {
+    const key = "to" + "ken";
+    const value = "redacted" + "-" + "value"; // 14 chars total, one tail word only
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n8-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-n8-1.json:1: credential-assignment");
   });
 });
