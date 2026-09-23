@@ -1240,3 +1240,514 @@ describe("leak-check.ts — #42 review: U+2060 and U+00AD are also stripped", ()
     expect(r.exitCode).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #46 — `credential-assignment`'s key alternation required the key
+// word to be followed directly (mod whitespace) by `:`/`=`. A QUOTED key —
+// the shape every JSON file, cloud service-account file, package.json-style
+// config, and JS/TS object with quoted keys actually uses — has a closing
+// quote sitting between the key and the separator, so the rule never even
+// produced a candidate match there: `{"token": "<secret>"}` gave zero
+// findings. Fix: a new leading alternative matching a whole quoted key —
+// `"KEY"` or `'KEY'`, literal matching quote pair, no backreference (so the
+// existing value capture groups m[1]..m[4] stay unshifted) — alongside the
+// existing unquoted, boundary-based alternatives. See CRED_KEY_QUOTED in
+// leak-check.ts.
+//
+// Every fixture below is built at RUNTIME via the quotedKV helper, never as
+// `"token": "<value>"` contiguous literal text in this file's own source —
+// this file is itself scanned by leak-check, and (per this issue's own fix)
+// a literal quoted-key shape in source is now a real finding, not a
+// synthetic one. Credential-shaped key words are additionally split across
+// string-literal fragments ("to" + "ken"), matching this file's existing
+// convention, so no keyword is ever contiguous in source either.
+//
+// "[watched]" tests were confirmed to give 0 findings against origin/main
+// (4a69f59) — see the PR body for the captured output — and are BLOCKED
+// after the fix.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds `"key": "value"` (or `'key': 'value'`) without the shape ever
+ * appearing as contiguous literal text in this file's source — see the note
+ * above.
+ */
+function quotedKV(key: string, value: string, quote: '"' | "'" = '"'): string {
+  return quote + key + quote + ":" + " " + quote + value + quote;
+}
+
+describe("leak-check.ts — issue #46: quoted credential keys", () => {
+  test('[watched] {"token": "<40>"} in a .json file is flagged', () => {
+    const key = "to" + "ken";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-1.json:1: credential-assignment");
+    expect(r.output).not.toContain(FAKE.envValue);
+  });
+
+  test('[watched] {"api_key": "<40>"} in a .json file is flagged', () => {
+    const key = "api" + "_key";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-2.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-2.json:1: credential-assignment");
+  });
+
+  test("[watched] {'secret': '<40>'} in a .ts file is flagged", () => {
+    const key = "sec" + "ret";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-3.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-3.ts:1: credential-assignment");
+  });
+
+  test("[watched] a nested service-account-shaped object with a quoted key is flagged", () => {
+    const key = "cli" + "ent_secret";
+    const line3 = "  " + quotedKV(key, FAKE.envValue) + ",\n";
+    const content = "{\n" + '  "type": "service_account",\n' + line3 + "}\n";
+    const f = write("f46-4.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-4.json:3: credential-assignment");
+  });
+
+  // Regression guards: the new quoted-key alternative must keep the same
+  // last-segment / placeholder / quote-pairing discipline as the unquoted
+  // branches, not become a looser match.
+  test('a quoted "tokenizer" key is not flagged (last-segment rule holds for quoted keys too)', () => {
+    const key = "token" + "izer";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-5.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted key with a placeholder value ("changeme") is still not flagged', () => {
+    const key = "to" + "ken";
+    const content = "{" + quotedKV(key, "change" + "me") + "}\n";
+    const f = write("f46-6.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("mismatched quote types around the key do not pair up (no match)", () => {
+    const key = "to" + "ken";
+    const dq = '"';
+    const sq = "'";
+    const content = "{" + dq + key + sq + ": " + dq + FAKE.envValue + dq + "}\n";
+    const f = write("f46-7.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a quoted key with an unquoted, code-expression-shaped value in .json still blocks (JSON has no code — no exemption)", () => {
+    // Answers the issue's last box directly: a JSON *value* is always a
+    // string/number/bool/null/object/array — never a code expression — so
+    // there is nothing to exempt. isCodeFile's extension list already
+    // excludes .json; this pins that an unquoted, member-expression-shaped
+    // value after a quoted JSON key is never accidentally given the .ts
+    // code-expression carve-out.
+    const key = "to" + "ken";
+    const dq = '"';
+    const value = "zeroReports" + "." + "token"; // shaped like the .ts code-expression carve-out
+    const content = "{" + dq + key + dq + ": " + value + "}\n";
+    const f = write("f46-8.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-8.json:1: credential-assignment");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review on #46, B1 — the first cut's CRED_KEY_QUOTED required the WHOLE
+// quoted content to equal a bare CRED_KEYS word, which is narrower than the
+// unquoted branches: those accept the keyword as the LAST SEGMENT after a
+// `_`/`-` separator or a camelCase transition (issue #37). Realistic quoted
+// keys with exactly that shape — `"refresh_token"`/`"access_token"` in an
+// OAuth token cache or a gcloud `authorized_user` credential file,
+// `"OPENAI_API_KEY"`/`"GITHUB_TOKEN"` in an MCP or Claude `settings.json`
+// `env` block, `"botToken"` in a bot `config.json` — were missed, quoted,
+// even though their unquoted forms were already caught.
+//
+// Fix: CRED_KEY_QUOTED now allows the same two boundary shapes inside the
+// quotes that the unquoted branches already use (an optional prefix ending
+// in `_`/`-`, or a prefix ending in a lowercase→uppercase camelCase step
+// feeding CRED_KEY_UPPER_FIRST) — see CRED_KEY_QUOTED's own comment in
+// leak-check.ts.
+//
+// "[watched]" tests were confirmed to give 0 findings against this PR's
+// pre-review head (24df365) — see the PR body for the captured output —
+// and are BLOCKED after the fix. N1 pins the negative the reviewer flagged
+// as missing (a bare letter-run prefix with no boundary must not match, the
+// mutation-surviving gap) alongside the existing "tokenizer" guard.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #46 review B1: quoted keys keep the unquoted branches' prefix/boundary allowance", () => {
+  const jsonCases: [string, string][] = [
+    ["f46-b1-1.json", "refresh" + "_" + "token"], // snake_case prefix
+    ["f46-b1-2.json", "access" + "_" + "token"], // snake_case prefix
+    ["f46-b1-3.json", "id" + "_" + "token"], // short snake_case prefix
+    ["f46-b1-4.json", "OPENAI" + "_" + "API" + "_" + "KEY"], // CONST_CASE prefix, compound keyword
+    ["f46-b1-5.json", "GITHUB" + "_" + "TOKEN"], // CONST_CASE prefix
+    ["f46-b1-6.json", "refresh" + "Token"], // camelCase prefix
+    ["f46-b1-7.json", "bot" + "Token"], // short camelCase prefix
+  ];
+
+  for (const [name, key] of jsonCases) {
+    // N5 (review on #46 round 2): a title built from key.slice(-5) collided
+    // ("token" x3, "Token" x2) — a failure couldn't point at one case. The
+    // fixture file name is unique per case and never itself credential-
+    // shaped, so it's used here instead.
+    test(`[watched] a quoted key is flagged in .json (${name})`, () => {
+      const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+      const f = write(name, content);
+      const r = run([f]);
+      expect(r.exitCode).toBe(1);
+      expect(r.output).toContain(`${name}:1: credential-assignment`);
+      expect(r.output).not.toContain(FAKE.envValue);
+    });
+  }
+
+  test('[watched] the same camelCase-prefixed quoted key is flagged in .ts too', () => {
+    const key = "refresh" + "Token";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue) + "};\n";
+    const f = write("f46-b1-8.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b1-8.ts:1: credential-assignment");
+  });
+
+  test('[N1] a quoted key with an arbitrary letter prefix and no boundary ("pretoken") is not flagged', () => {
+    const key = "pre" + "token";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-n1-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted all-uppercase run with no separator and no camelCase transition ("MYTOKEN") is not flagged', () => {
+    const key = "MY" + "TOKEN";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-n1-2.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted "tokenizer" key (keyword as a PREFIX, not the last segment) is still not flagged', () => {
+    const key = "token" + "izer";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-n1-3.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted "passwordField" key (a type-annotation-style name, keyword as a PREFIX) is not flagged', () => {
+    const key = "password" + "Field";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-n1-4.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review on #46 round 2, B2 — B1's fix widened the quoted prefix boundary to
+// `[A-Za-z0-9_-]*[_-]` / `[A-Za-z0-9_-]*[a-z]`, but the UNQUOTED boundary
+// (`(?<![A-Za-z0-9])`) accepts ANY non-alphanumeric character before the
+// key, not only `_`/`-`. A dotted key (Spring Boot / VS Code
+// `settings.json`-style: `"spring.datasource.password"`, `"<ext>.apiKey"`)
+// or a colon-separated key (`"aws:secret"`) was still missed quoted while
+// caught unquoted.
+//
+// Fix: CRED_KEY_QUOTED's prefix now runs up to its own branch's closing
+// quote (`[^"\n]*`/`[^'\n]*`) and requires the character immediately before
+// the keyword to be non-alphanumeric (not a fixed `[_-]` class) — see
+// CRED_KEY_QUOTED's own comment in leak-check.ts. This makes the quoted
+// boundary the SAME set of accepted preceding characters as the unquoted
+// one, not merely similar to it.
+//
+// "[watched]" tests were confirmed to give 0 findings against this PR's
+// pre-round-3-review head (9c71592) and are BLOCKED after the fix.
+// `"x-api-key"` specifically pins the `-` (kebab-case) prefix character,
+// the mutation (M12 in the review) that survived round 2's tests.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #46 review B2: the quoted boundary accepts ANY non-alphanumeric character, not only _/-", () => {
+  // The `.`/`:` cases below were 0 findings at this PR's pre-round-3-review
+  // head (9c71592) — genuinely "[watched]". `-` (kebab-case) was ALREADY
+  // handled correctly by round 2's `[_-]` class; it had no dedicated test
+  // (the review's M12 mutation — dropping `-` from that class — survived
+  // for exactly that reason), so it's pinned separately below WITHOUT the
+  // "[watched]" tag, since it does not fail at 9c71592.
+  const jsonCases: [string, string][] = [
+    ["f46-b2-1.json", "spring" + "." + "datasource" + "." + "password"], // dotted prefix
+    ["f46-b2-2.json", "github" + "." + "token"], // short dotted prefix
+    ["f46-b2-4.json", "aws" + ":" + "secret"], // colon-separated prefix
+  ];
+
+  for (const [name, key] of jsonCases) {
+    test(`[watched] a quoted key with a non-alnum-separated prefix is flagged in .json (${name})`, () => {
+      const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+      const f = write(name, content);
+      const r = run([f]);
+      expect(r.exitCode).toBe(1);
+      expect(r.output).toContain(`${name}:1: credential-assignment`);
+      expect(r.output).not.toContain(FAKE.envValue);
+    });
+  }
+
+  test("a quoted kebab-case-prefixed key is flagged in .json (f46-b2-3.json) — pins M12 (dropping '-' from the boundary class survived round 2's tests)", () => {
+    const key = "x" + "-" + "api" + "-" + "key";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-b2-3.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b2-3.json:1: credential-assignment");
+    expect(r.output).not.toContain(FAKE.envValue);
+  });
+
+  test("[watched] the same dotted-prefix quoted key is flagged in .ts too", () => {
+    const key = "github" + "." + "token";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue) + "};\n";
+    const f = write("f46-b2-5.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b2-5.ts:1: credential-assignment");
+  });
+
+  // Regression guards, re-pinned at this boundary too (unchanged per the
+  // review): a letter-run prefix, an all-uppercase run with no transition,
+  // the keyword as a prefix rather than the last segment, and a
+  // type-annotation-style name all still don't match.
+  test('a quoted key with an arbitrary letter prefix and no boundary ("pretoken") is still not flagged', () => {
+    const key = "pre" + "token";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-b2-n1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted all-uppercase run with no separator and no camelCase transition ("MYTOKEN") is still not flagged', () => {
+    const key = "MY" + "TOKEN";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-b2-n2.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted "tokenizer" key is still not flagged', () => {
+    const key = "token" + "izer";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-b2-n3.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a quoted "passwordField" key is still not flagged', () => {
+    const key = "password" + "Field";
+    const content = "{" + quotedKV(key, FAKE.envValue) + "}\n";
+    const f = write("f46-b2-n4.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review on #46 round 2, N4 — the factory scan (metafactory-factory-website)
+// turned up a synthetic fixture whose quoted `*_token` value is a
+// hyphenated, all-caps, multi-word phrase that labels itself a placeholder
+// (contains words like "example"/"not"/"redacted"/"token") but whose FIRST
+// word — a single-word placeholder like `redacted` — was recognised only as
+// a whole value, not as a phrase head. `leak-check:allow` can't resolve
+// this (line-scoped, needs a comment; JSON has no comment syntax), so
+// editing the fixture would be a change made only to pass the detector —
+// refused per this repo's own #30/#33 precedent. Fix: PLACEHOLDER_PHRASE_HEAD
+// widens the phrase-head set from `not`/`should`/`never` to also include
+// `redacted`/`placeholder`/`todo`/`tbd` — words that name the ANNOTATION
+// itself, not the secret — so a hyphenated, 2-or-more-word, all-letter
+// phrase starting with ANY of them is recognised, case-insensitively, under
+// the SAME shape (`(?:-[a-z]{1,12}){2,}`) that already protected
+// `not`/`should`/`never` from swallowing a real secret or password.
+//
+// Round 3 review, B3 — the FIRST CUT of this widening went too far: it
+// added every single-word placeholder (`password`, `secret`, `token`,
+// `test`, `true`, `none`, `empty`, …) as a phrase head too, which excused
+// REAL human-chosen, word-only passphrases — `password-for-prod`,
+// `secret-key-value`, `test-live-key`, `token-abc-def`,
+// `true-blue-ocean-cat`, `none-of-your-business` — that `main` (and every
+// prior round of this PR) correctly still blocked. This is exactly the
+// #42 F1 shape ("a human-chosen password that reads as a sentence"),
+// reachable by a password generator that defaults to hyphenated word
+// lists, or a person typing a memorable phrase into a `.env` by hand.
+// PLACEHOLDER_PHRASE_HEAD is now the narrow four-plus-three-word set —
+// `redacted`/`placeholder`/`todo`/`tbd` alongside `not`/`should`/`never` —
+// and each of the six phrases above must still block, unquoted in `.env`
+// and quoted in `.json` alike (credential-assignment's placeholder check
+// doesn't distinguish the two once past the key match).
+//
+// The two positive fixtures below are SYNTHETIC values built for this
+// shape, not the factory fixture's actual text.
+//
+// "[watched]" tests are confirmed to give the WRONG result — a positive
+// excused where it should block, i.e. exit 0 where main gives exit 1 — at
+// this PR's pre-round-4-review head (5e582c4), and correct afterward.
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #46 review N4: the placeholder phrase-head set covers redacted/placeholder/todo/tbd", () => {
+  test('a quoted key whose value is a hyphenated ALL-CAPS phrase headed by "placeholder" is not flagged', () => {
+    const key = "api" + "_token";
+    const value = "PLACEHOLDER" + "-" + "EXAMPLE" + "-" + "VALUE" + "-" + "ONLY";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n4-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a value headed by "redacted" (a different phrase from the factory fixture) is not flagged', () => {
+    const key = "cli" + "ent_secret";
+    const value = "redacted" + "-" + "sample" + "-" + "data" + "-" + "only";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n4-3.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a value headed by "todo" is not flagged', () => {
+    const key = "to" + "ken";
+    const value = "todo" + "-" + "fill" + "-" + "me" + "-" + "in";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n4-4.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a hyphenated phrase whose FIRST word is a random 40-char token is still flagged (the head must be a real placeholder word)", () => {
+    const key = "api" + "_token";
+    const value = FAKE.envValue + "-not-real"; // 40-char synthetic "random" head, not a placeholder word
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n4-2.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-n4-2.json:1: credential-assignment");
+    expect(r.output).not.toContain(FAKE.envValue);
+  });
+});
+
+describe("leak-check.ts — #46 review B3: word-only passphrases headed by an ordinary credential word still block", () => {
+  const envCases: [string, string, string][] = [
+    ["f46-b3-1.env", "DB_PASSWORD", "password" + "-" + "for" + "-" + "prod"],
+    ["f46-b3-2.env", "secret", "secret" + "-" + "key" + "-" + "value"],
+    ["f46-b3-3.env", "api_key", "test" + "-" + "live" + "-" + "key"],
+    ["f46-b3-4.env", "token", "token" + "-" + "abc" + "-" + "def"],
+    ["f46-b3-5.env", "password", "true" + "-" + "blue" + "-" + "ocean" + "-" + "cat"],
+    ["f46-b3-6.env", "secret", "none" + "-" + "of" + "-" + "your" + "-" + "business"],
+  ];
+
+  for (const [name, key, value] of envCases) {
+    test(`[watched] ${key}=<word-only phrase> in .env still blocks (${name})`, () => {
+      const content = `${key}=${value}\n`;
+      const f = write(name, content);
+      const r = run([f]);
+      expect(r.exitCode).toBe(1);
+      expect(r.output).toContain(`${name}:1: credential-assignment`);
+    });
+  }
+
+  // Coordinator's exact case (DB_PASSWORD key, a "password" + "for" + "prod"
+  // word-only phrase value), as a dedicated pin. The title below is worded
+  // to avoid writing that key/value shape contiguously — this file is
+  // itself scanned by leak-check, and that exact shape is what this test
+  // exists to make it catch.
+  test("[watched] an uppercase env-style PASSWORD key set to a word-only phrase still blocks", () => {
+    const value = "password" + "-" + "for" + "-" + "prod";
+    const content = `DB_PASSWORD=${value}\n`;
+    const f = write("f46-b3-0.env", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-0.env:1: credential-assignment");
+  });
+
+  // At least two of the six phrases, quoted, in .json — the placeholder
+  // check doesn't care whether the value arrived quoted or unquoted.
+  test("[watched] a quoted \"password-for-prod\"-shaped value in .json still blocks", () => {
+    const key = "pass" + "word";
+    const value = "password" + "-" + "for" + "-" + "prod";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-b3-7.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-7.json:1: credential-assignment");
+  });
+
+  test("[watched] a quoted \"secret-key-value\"-shaped value in .json still blocks", () => {
+    const key = "sec" + "ret";
+    const value = "secret" + "-" + "key" + "-" + "value";
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-b3-8.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-8.json:1: credential-assignment");
+  });
+
+  test("[watched] an uppercase TEST-LIVE-KEY-shaped value in .env still blocks", () => {
+    const value = "TEST" + "-" + "LIVE" + "-" + "KEY";
+    const content = `api_key=${value}\n`;
+    const f = write("f46-b3-9.env", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-b3-9.env:1: credential-assignment");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N7/N8 (review on #46 round 3) — the single-quote branch of CRED_KEY_QUOTED
+// was untested beyond a bare key (mutations M16-M18 on the `'` boundary, `'`
+// camelCase branch, and `'` prefix all survived round 3's tests), and
+// nothing pinned that the placeholder phrase needs TWO OR MORE tail words,
+// not one (M21 survived).
+// ---------------------------------------------------------------------------
+
+describe("leak-check.ts — #46 review N7: the single-quote branch gets the same coverage as the double-quote one", () => {
+  test("a single-quoted dotted-prefix key is flagged in .ts", () => {
+    const key = "spring" + "." + "datasource" + "." + "password";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-n7-1.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-n7-1.ts:1: credential-assignment");
+    expect(r.output).not.toContain(FAKE.envValue);
+  });
+
+  test("a single-quoted camelCase-prefixed key is flagged in .ts (pins the ' CRED_KEY_UPPER_FIRST branch)", () => {
+    const key = "refresh" + "Token";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-n7-2.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-n7-2.ts:1: credential-assignment");
+  });
+
+  test("a single-quoted \"pretoken\" key (no boundary) is not flagged in .ts", () => {
+    const key = "pre" + "token";
+    const content = "const cfg = {" + quotedKV(key, FAKE.envValue, "'") + "};\n";
+    const f = write("f46-n7-3.ts", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+describe("leak-check.ts — #46 review N8: a placeholder phrase needs TWO OR MORE tail words, not one", () => {
+  test('a value that is a placeholder head plus exactly ONE tail word ("redacted-value") still blocks', () => {
+    const key = "to" + "ken";
+    const value = "redacted" + "-" + "value"; // 14 chars total, one tail word only
+    const content = "{" + quotedKV(key, value) + "}\n";
+    const f = write("f46-n8-1.json", content);
+    const r = run([f]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("f46-n8-1.json:1: credential-assignment");
+  });
+});

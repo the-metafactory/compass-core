@@ -287,6 +287,47 @@
  * anything else touches that text — see the call sites in the main scan
  * loop and in `reasonContainsFinding`.
  *
+ * QUOTED KEYS (issue #46): `credential-assignment`'s key alternation used to
+ * require the key word to sit directly (mod whitespace) before `:`/`=`. A
+ * quoted key — `"token": "…"`, the shape of every JSON file, cloud
+ * service-account file, `package.json`-style config, and JS/TS object with
+ * quoted keys — has a closing quote in between, so the rule never fired
+ * there at all; this was probably the biggest miss of anything #37/#42
+ * fixed. Fixed with a new leading alternative, CRED_KEY_QUOTED, matching a
+ * whole quoted key — `"KEY"`/`'KEY'`, or the key word preceded, inside the
+ * quotes, by ANY non-alphanumeric character or by a lowercase-to-uppercase
+ * step (`"refresh_token"`, `"spring.datasource.password"`, `"aws:secret"`,
+ * `"OPENAI_API_KEY"`, `"refreshToken"` all match; `"pretoken"`/`"tokenizer"`
+ * still don't — reviews on #46, B1 and B2; see CRED_KEY_QUOTED's own comment
+ * for the two boundary constructions, why they're quantifier-based rather
+ * than lookaround, and why that set of accepted preceding characters is
+ * exactly the unquoted boundary's set, not merely similar to it). No other
+ * rule needed a quoted-key path: the dedicated shape rules (`jwt`,
+ * `sendgrid-api-key`, etc.) never depended on a key name in the first
+ * place, and the denylist is a plain substring match regardless of
+ * surrounding syntax.
+ *
+ * JSON VALUES NEVER GET THE CODE-EXPRESSION CARVE-OUT, AND THAT IS CORRECT,
+ * NOT AN OVERSIGHT (issue #46's last box): the code-expression exemption in
+ * `accept` (see CODE EXPRESSIONS ARE NOT CREDENTIALS above) only applies
+ * when `isCodeFile` or `isMarkdown && closesInlineCode` is true, and
+ * `isCodeFile`'s extension list (`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`)
+ * has never included `.json` — an unquoted, member-expression-shaped value
+ * in a `.json` file already fell through to `return true` (flagged)
+ * unconditionally, before and after this issue's fix. That is the right
+ * behaviour, not an accident worth widening: valid JSON has exactly six
+ * value kinds — string, number, boolean, null, object, array — and NONE of
+ * them is a code expression. `token: zeroReports.token` reads as a call/
+ * member-access chain only because JS/TS syntax makes an unquoted bareword
+ * a variable reference; the identical bytes in a `.json` file are either a
+ * syntax error (if genuinely unquoted) or, quoted, an ordinary string whose
+ * content happens to contain dots — never evaluated, never a reference to
+ * anything. A "JS/TS code expression exemption for JSON" would just be a
+ * new way to launder a real secret past the scanner by wrapping the file in
+ * `.json`, for a carve-out whose entire justification (the domain-word
+ * false positive from issue #31 — `token: zeroReports.token` meaning "the
+ * `.token` property of `zeroReports`") cannot occur in JSON at all.
+ *
  * Exit codes: 0 = clean, 1 = findings, 2 = usage/configuration error.
  */
 
@@ -362,6 +403,72 @@ const CRED_KEY_ANY = `(?:${CRED_KEYS.map(ci).join("|")})`;
 const CRED_KEY_UPPER_FIRST = `(?:${CRED_KEYS.map((k) => k[0]!.toUpperCase() + ci(k.slice(1))).join("|")})`;
 
 /**
+ * A QUOTED key — issue #46: `credential-assignment`'s key alternation above
+ * requires the key word to be followed directly (mod whitespace) by `:`/`=`,
+ * which is exactly what a JSON file, a cloud service-account file, a
+ * `package.json`-style config, or a JS/TS object with quoted keys never
+ * gives it — a closing quote sits between the key and the separator
+ * (`"token": "…"`), so the rule never produced a candidate match there at
+ * all. `{"token": "<secret>"}` gave zero findings on main.
+ *
+ * First cut (review on #46, B1) required the WHOLE quoted content to equal a
+ * bare `CRED_KEYS` word, so it was narrower than the unquoted branches — it
+ * missed `"refresh_token"`, `"access_token"`, `"OPENAI_API_KEY"`,
+ * `"GITHUB_TOKEN"` (snake_case / CONST_CASE prefix) and `"refreshToken"` /
+ * `"botToken"` (camelCase prefix). B1's fix only widened the prefix class to
+ * `[A-Za-z0-9_-]` with the boundary character restricted to `_`/`-`, which a
+ * second review (B2) found was STILL narrower than the unquoted boundary:
+ * the unquoted `(?<![A-Za-z0-9])` lookbehind accepts ANY non-alphanumeric
+ * character before the key (`.`, `:`, `/`, a space — not just `_`/`-`), so a
+ * dotted key like `"spring.datasource.password"` (Spring Boot / VS Code
+ * `settings.json`-style: `"<ext>.apiKey"`) or a colon-separated
+ * `"aws:secret"` was still missed quoted while caught unquoted.
+ *
+ * Fixed (B2) by making the prefix's terminal character ANY non-alphanumeric
+ * character, not a fixed `[_-]` class, and bounding the arbitrary run by the
+ * quote the branch itself uses (so a double-quote branch's prefix can never
+ * run past the next `"` on the line, keeping backtracking bounded):
+ *   1. `"(?:[^"\n]*[^A-Za-z0-9"\n])?${CRED_KEY_ANY}"` — an optional prefix of
+ *      any characters except the closing quote or a newline, but ONLY when
+ *      the character immediately before the keyword is neither alphanumeric
+ *      nor the quote nor a newline. With no prefix at all, this reduces to
+ *      the original bare `"KEY"` case.
+ *   2. `"[^"\n]*[a-z]${CRED_KEY_UPPER_FIRST}"` — the same unbounded prefix,
+ *      but required to end in a lowercase ASCII letter immediately before
+ *      `CRED_KEY_UPPER_FIRST` (which forces the keyword's own first letter
+ *      literally uppercase), so `"refreshToken"` and `"botToken"` match via
+ *      the camelCase transition, same as their unquoted forms — a run of
+ *      uppercase letters with no such transition (`"MYTOKEN"`) still doesn't
+ *      match, because there is no lowercase letter anywhere for `[a-z]` to
+ *      land on.
+ * The single-quote branch is the same shape with `'` in place of `"`
+ * throughout (`[^'\n]`, terminated by `'`).
+ *
+ * This is now the SAME RULE as the unquoted boundary — "any non-alphanumeric
+ * character, or a lowercase-to-uppercase step, immediately before the key
+ * word" — expressed with quantifiers instead of lookaround, because a
+ * variable-length prefix can't sit inside a fixed-width lookbehind. It is
+ * not merely similar to the unquoted rule; it accepts exactly the same set
+ * of preceding characters.
+ *
+ * The keyword must still be the LAST segment before the closing quote —
+ * nothing follows it but the literal quote character — so `"tokenizer"` and
+ * `"pretoken"` (no non-alnum/camelCase boundary immediately before "token")
+ * still don't match: an arbitrary letter-run prefix with no boundary is
+ * exactly what this is designed to reject. See the quoted-key tests in
+ * `__tests__/leak-check.test.ts` for both directions.
+ *
+ * Neither alternative adds a capturing group (`(?:…)` throughout), so the
+ * value alternation's existing `m[1]`..`m[4]` indices (read throughout
+ * `accept`) stay unshifted.
+ */
+const CRED_KEY_QUOTED_DQ =
+  `(?:"(?:[^"\\n]*[^A-Za-z0-9"\\n])?${CRED_KEY_ANY}"` + `|"[^"\\n]*[a-z]${CRED_KEY_UPPER_FIRST}")`;
+const CRED_KEY_QUOTED_SQ =
+  `(?:'(?:[^'\\n]*[^A-Za-z0-9'\\n])?${CRED_KEY_ANY}'` + `|'[^'\\n]*[a-z]${CRED_KEY_UPPER_FIRST}')`;
+const CRED_KEY_QUOTED = `(?:${CRED_KEY_QUOTED_DQ}|${CRED_KEY_QUOTED_SQ})`;
+
+/**
  * Built-in ruleset — deliberately small and shape-based. These are the leaks that
  * are wrong in *any* repository; anything organisation-specific belongs in the
  * operator pattern file, never here (this file is public).
@@ -427,9 +534,10 @@ const RULES: Rule[] = [
     // No `/i` flag — the boundary rule depends on real (not case-folded)
     // case, so case-insensitivity is baked into CRED_KEY_ANY /
     // CRED_KEY_UPPER_FIRST letter by letter instead. See CREDENTIAL KEY
-    // NAMES in the file header and #42's F2.
+    // NAMES in the file header and #42's F2. The quoted-key alternative
+    // (CRED_KEY_QUOTED, issue #46) comes first — see its own comment above.
     re: new RegExp(
-      `(?:(?<![A-Za-z0-9])${CRED_KEY_ANY}|(?<=[a-z])${CRED_KEY_UPPER_FIRST})(?![A-Za-z0-9_])\\s*[:=]\\s*` +
+      `(?:${CRED_KEY_QUOTED}|(?<![A-Za-z0-9])${CRED_KEY_ANY}|(?<=[a-z])${CRED_KEY_UPPER_FIRST})(?![A-Za-z0-9_])\\s*[:=]\\s*` +
         `(?:"([^"\\n]*)"|'([^'\\n]*)'|\`([^\`\\n]*)\`|(${UNQUOTED_CHAR}+))`,
     ),
     accept: (m, ctx) => {
@@ -494,15 +602,69 @@ const RULES: Rule[] = [
 // sentence for exactly that reason (`not_my_password_2024`,
 // `never-guess-me-99`), which main correctly still blocks. The two factory
 // fixtures are hyphenated ENGLISH PHRASES, so the fix matches that shape
-// instead of the single-separator one: `not`/`should`/`never` followed by
-// AT LEAST TWO more hyphen-separated letter-only words (no digits, no
+// instead of the single-separator one: a placeholder word followed by AT
+// LEAST TWO more hyphen-separated letter-only words (no digits, no
 // underscores) — `(?:-[a-z]{1,12}){2,}`. `not-a-real-token` and
 // `should-never-be-here` still match (three and four more words); a real
 // secret or password that merely starts with the bare word does not, since
 // a base64url/digit-bearing/underscore-joined tail never satisfies "two more
 // all-letter hyphen segments" by chance.
-const PLACEHOLDER =
-  /^(?:x+|\*+|\.+|-+|_+|change[-_ ]?me|redacted|placeholder|unset|dummy|test|todo|tbd|none|null|nil|true|false|undefined|empty|secret|password|token|(?:your|my|sample|fake|example|dummy|replace)[-_][a-z0-9_-]*|(?:not|should|never)(?:-[a-z]{1,12}){2,})$/i;
+//
+// PHRASE-HEAD SET WIDENED FROM `not`/`should`/`never` TO `redacted`/
+// `placeholder`/`todo`/`tbd` ONLY (review on #46, N4, tightened on the
+// following review's B3 after a first cut over-widened it — see below):
+// the factory scan turned up a fixture whose quoted `*_token` value is a
+// hyphenated, all-caps, five-word phrase that labels itself a placeholder —
+// it contains "example", "not", "redacted" and "token" — but its FIRST
+// word is "redacted", and `redacted` was accepted only as a whole value
+// (`^redacted$`), not as a phrase head. A `leak-check:allow` marker can't
+// fix this: it's line-scoped and needs a comment, and JSON has no comment
+// syntax, so the only way to attach one would be editing the fixture's
+// value or structure — a change made only to pass the detector, which
+// sops/confidentiality-gate.md and this repo's own #30/#33 precedent
+// refuse. The right fix is the detector: `redacted` (and `placeholder`,
+// `todo`, `tbd` — words that name the ANNOTATION itself, not the secret) is
+// now ALSO a valid phrase head, case-insensitively, under the same "two or
+// more all-letter hyphenated words follow" shape already used for
+// `not`/`should`/`never`.
+//
+// B3 — WHY THE HEAD SET IS EXACTLY THIS SHORT, AND NOT EVERY WHOLE-VALUE
+// PLACEHOLDER WORD: the first cut of this widening (round 3) added every
+// single-word placeholder on the list below — including `password`,
+// `secret`, `token`, `test`, `true`, `none`, `empty` — as phrase heads too.
+// Review on #46, B3 found that this regressed #42 F1: a human-chosen,
+// word-only passphrase is a REALISTIC accidental leak, not a hypothetical
+// one (a password manager's word-list generator, or someone typing a
+// memorable phrase straight into a `.env`), and `password-for-prod`,
+// `secret-key-value`, `test-live-key`, `token-abc-def`, `true-blue-ocean-
+// cat`, `none-of-your-business` are exactly that shape — three or more
+// all-letter hyphenated words, no digits, no underscores — the SAME shape
+// this rule exists to recognise as a disclaimer. Unlike `not`/`should`/
+// `never`/`redacted`/`placeholder`/`todo`/`tbd`, words like `password` and
+// `secret` are not merely "a possible first word of a sentence" — they are
+// the credential's own name, or an ordinary word, and are exactly what a
+// human picks FIRST when hand-writing a real password. The claim that
+// "no accidental real secret starts with one of these words" holds for
+// `not`/`should`/`never`/`redacted`/`placeholder`/`todo`/`tbd` — nobody
+// names a real secret starting with a word that means "this is fake" or
+// "fill this in later" — and does NOT hold for `password`/`secret`/`token`/
+// `test`/`true`/`false`/`none`/`null`/`nil`/`empty`/`undefined`/`unset`/
+// `dummy`, which stay OUT of PLACEHOLDER_PHRASE_HEAD even though they
+// remain valid as a WHOLE VALUE on their own (see the bare-word alternation
+// below — `^secret$`/`^password$` alone are still placeholders; only the
+// PHRASE-HEAD use, where any two-or-more-word tail is now enough, is
+// narrower). PLACEHOLDER_PHRASE_HEAD also deliberately excludes the
+// punctuation-repeat entries (`x+`, `*+`, `.+`, `-+`, `_+`) — not
+// word-shaped, so "a phrase starting with one of these" isn't a coherent
+// idea — and the `change[-_ ]?me` entry, which already has its own internal
+// separator shape and isn't a plain word literal.
+const PLACEHOLDER_PHRASE_HEAD = "(?:redacted|placeholder|todo|tbd|not|should|never)";
+const PLACEHOLDER = new RegExp(
+  "^(?:x+|\\*+|\\.+|-+|_+|change[-_ ]?me|redacted|placeholder|unset|dummy|test|todo|tbd|none|null|nil|true|false|undefined|empty|secret|password|token|" +
+    "(?:your|my|sample|fake|example|dummy|replace)[-_][a-z0-9_-]*|" +
+    `${PLACEHOLDER_PHRASE_HEAD}(?:-[a-z]{1,12}){2,})$`,
+  "i",
+);
 
 /**
  * Last-segment-of-an-identifier check for `credential-assignment`'s key
