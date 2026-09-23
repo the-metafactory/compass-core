@@ -33,71 +33,99 @@
  *                     This flag does not exempt that path from being scanned —
  *                     see "THE BENIGN LIST" below.
  *   --refs HEAD|all   Which corpus commits to search. Default "all": every
- *                     blob reachable from every local branch, remote-tracking
- *                     branch, and tag tip (deduplicated by content), plus
- *                     HEAD itself. "HEAD" restricts the search to HEAD only —
- *                     narrower, and correspondingly less coverage; see SCOPE.
+ *                     blob in the TIP TREE of every local branch, remote-
+ *                     tracking branch, and tag (deduplicated by content),
+ *                     plus HEAD's own tip tree. "HEAD" restricts it to HEAD's
+ *                     tip tree only — narrower, correspondingly less
+ *                     coverage; see SCOPE. Neither mode walks history: a
+ *                     commit's tree at the moment it was HEAD-of-some-ref is
+ *                     read, not every tree it and its ancestors ever had.
  *
  * SCOPE — WHAT IS AND ISN'T SEARCHED, PRINTED ON EVERY RUN:
  * The corpus's blobs are read once, deduplicated by content (git object id),
- * from every ref this run resolves (all branches/remotes/tags by default, or
- * HEAD alone with --refs HEAD). The first output line reports what that
- * amounted to: refs searched, unique paths reachable, unique blobs actually
- * read, total bytes, and three "not searched" counts that are NEVER folded
- * silently into a clean result:
+ * from the TIP TREE of every ref this run resolves (all branches/remotes/
+ * tags by default, or HEAD alone with --refs HEAD) — "tip tree," not "every
+ * reachable blob": git's own sense of "reachable" includes history, and this
+ * tool does not walk it (see OUT OF SCOPE below). The first output line
+ * reports what that amounted to: refs searched, unique paths reachable in
+ * those tip trees, unique blobs actually fetched, total bytes fetched
+ * (searched and not — see BINARY below), and three "not searched" counts
+ * that are NEVER folded silently into a clean result:
  *   - gitlinks/submodules: `ls-tree` entries of type `commit` point at a
  *     separate repository this tool does not follow. Counted, never searched.
  *   - binary corpus blobs: content with a NUL in its first 8KB (mirrors
- *     leak-check.ts's binary heuristic). Counted, never shingled.
+ *     leak-check.ts's binary heuristic). Counted, never shingled. (This
+ *     heuristic applies to the CORPUS side only — see BINARY FILES IN THE
+ *     DIFF below for why the diff side does not use one at all.)
  *   - UTF-16 blobs (LE or BE, detected by BOM) ARE decoded and searched —
  *     they're counted separately in the scope line, but they count toward
  *     "blobs read," not toward "not searched." A UTF-16 file with no BOM,
  *     or any other multi-byte encoding, is indistinguishable from binary to
  *     the NUL heuristic and is counted as binary.
- * OUT OF SCOPE, not counted because this tool cannot see it: content in the
- * corpus checkout's UNCOMMITTED working tree or index (only committed refs
- * are read), and Git LFS pointer files (the pointer text is searched like any
- * blob, but the real content LFS defers to is never fetched or read).
+ * OUT OF SCOPE ENTIRELY, not counted because this tool has no way to see it:
+ *   - the corpus checkout's UNCOMMITTED working tree or index (only
+ *     committed, ref-tip content is ever read);
+ *   - HISTORY: text that exists only in an older commit — not at any current
+ *     ref's tip — is not searched, by the "tip tree only" design above;
+ *   - `refs/stash`: for-each-ref is given refs/heads, refs/remotes, and
+ *     refs/tags explicitly, and a stash is none of those;
+ *   - Git LFS pointer files (the pointer text is searched like any blob, but
+ *     the real content LFS defers to is never fetched or read).
  *
- * THE SEARCH IS A SET INTERSECTION, NOT ONE GREP PER SHINGLE.
+ * THE SEARCH IS A LOOKUP, NOT ONE GREP PER SHINGLE.
  * Every corpus blob's content is normalised and broken into an in-memory
- * Set<string> of every n-word shingle the corpus contains — patterns and
- * paths never touch a subprocess's argv, only `cat-file --batch`'s stdin.
- * The diff's added lines go through the same normalisation and windowing,
- * and matching is a Set lookup. This has no per-shingle process-spawn cost,
- * no argv size limit (an oversized added "word" — a minified bundle, a
- * data: URI — cannot crash a spawn call the way it could when each shingle
- * went through argv to a `git grep` subprocess), and it naturally tolerates
- * whitespace differences on both sides, because both sides are normalised
- * before either is a Set member or a lookup key.
+ * Map<string, count> of every n-word shingle the corpus contains — patterns
+ * and paths never touch a subprocess's argv, only `cat-file --batch`'s
+ * stdin. The diff's added lines go through the same normalisation and
+ * windowing, and matching is a lookup (`corpusHas`) through `findMatches`
+ * (shared with the control — see below). This has no per-shingle process-
+ * spawn cost, no argv size limit (an oversized added "word" — a minified
+ * bundle, a data: URI — cannot crash a spawn call the way it could when
+ * each shingle went through argv to a `git grep` subprocess), and it
+ * naturally tolerates whitespace differences on both sides, because both
+ * sides are normalised before either is a lookup key.
  *
  * NORMALISATION: every run of whitespace — spaces, tabs, newlines, carriage
  * returns, and U+00A0 (non-breaking space, already inside JavaScript's `\s`
  * class) — collapses to a single space before either side is shingled, and
- * zero-width characters (U+200B–U+200D, U+FEFF) are stripped outright, since
- * `\s` does not treat them as whitespace and left alone they'd silently split
- * a shingle that reads as one word to a human. This is what lets the tool
- * catch text reflowed across lines, re-indented, or pasted with a different
- * line-wrap: byte-for-byte matching could not, and that was a regression from
- * the hand-rolled method this tool replaces. On the corpus side, normalising
- * per FILE (not per line) also means a shingle split across two lines in the
- * corpus is still a corpus shingle. On the diff side, normalising per HUNK
- * (not per added line) means a shingle split across two adjacent added lines
- * in one hunk is still caught — see `extractAddedRuns`.
+ * a fixed set of non-whitespace characters is stripped outright: zero-width
+ * characters (U+200B–U+200D, U+FEFF — `\s` does not treat them as
+ * whitespace, and left alone one sitting mid-word would silently split a
+ * shingle that reads as one word to a human) and NUL (U+0000 — round 4's
+ * H1: a NUL glued directly onto a word is not whitespace either, and left
+ * in place it turns that word into a token that will never equal the clean
+ * version, a single byte silently defeating the match). This is what lets
+ * the tool catch text reflowed across lines, re-indented, or pasted with a
+ * different line-wrap: byte-for-byte matching could not, and that was a
+ * regression from the hand-rolled method this tool replaces. On the corpus
+ * side, normalising per FILE (not per line) also means a shingle split
+ * across two lines in the corpus is still a corpus shingle. On the diff
+ * side, normalising per HUNK (not per added line) means a shingle split
+ * across two adjacent added lines in one hunk is still caught — see
+ * `extractAddedRuns`.
  *
  * WHY THE CONTROL EXERCISES THE DIFF-SIDE PATH, NOT THE CORPUS ITSELF:
- * a control that just asks "is the corpus's own shingle Set non-empty" can
+ * a control that just asks "is the corpus's own shingle set non-empty" can
  * never fail once the corpus has been read at all — it says nothing about
  * whether the DIFF side would actually find something real. So the control
- * draws a raw (pre-normalisation) fragment out of one corpus blob and feeds
- * it through the exact same pipeline a real added diff run goes through —
- * `extractAddedRuns` → `runsToShingles` (normalise, then window) — and then
- * the same `corpusHas` lookup the real search uses. If that produces no
- * match, the run is INERT: not "the corpus is unreadable" specifically, but
- * "the two pipelines disagree about the exact same text," which is the
- * observable symptom of a broken lookup, a normalisation step that silently
- * stopped running, or the corpus and diff sides drifting out of sync with
- * each other — none of which a self-referential check could ever catch.
+ * draws a raw (pre-normalisation) fragment out of one corpus blob and
+ * injects it as one more element of `addedRuns` — the SAME array the real
+ * diff's shingles come from, not a parallel computation — before the shared
+ * `runsToShingles()` and `findMatches()` calls run (round 4: this closes the
+ * "wiring" gaps a round-3 review found — the search loop and the specific
+ * assignment that builds the diff's shingle set were not previously
+ * exercised by the control at all). Provenance (control-only vs. genuinely
+ * present in the diff) is tracked by COUNT, not by excluding the control's
+ * shingle value from the result: a real match that happens to equal the
+ * exact text the control drew must still be reported, and a naive "not
+ * equal to the control shingle" filter would silently drop it — see
+ * `fromRealDiff`. If the control's own shingle produces no match at all,
+ * the run is INERT: not "the corpus is unreadable" specifically, but "the
+ * diff-side pipeline and the corpus's own index disagree about the exact
+ * same text," which is the observable symptom of a broken lookup, a
+ * normalisation step that silently stopped running, or the corpus and diff
+ * sides drifting out of sync — none of which a self-referential check
+ * could ever catch.
  *
  * ANY GIT FAILURE DURING THE READ IS INERT, NEVER "NO MATCH". Every git
  * plumbing call this tool makes after argument validation — for-each-ref,
@@ -110,28 +138,48 @@
  *
  * THE DIFF SIDE CANNOT BE EMPTIED BY THE THING BEING DIFFED. `git diff` runs
  * with `--no-ext-diff --no-textconv --text --no-renames`: no external diff
- * driver, no textconv filter, every file forced to text mode regardless of a
- * `.gitattributes -diff` marker or an embedded NUL byte, and no rename
- * detection to keep numstat's paths and the unified diff's paths in exact
- * agreement. The parsed added-line count is cross-checked against a separate
- * `git diff --numstat` run (same flags): any disagreement that isn't
- * explained by a binary file (see BINARY FILES) is INERT.
+ * driver, no textconv filter, and every file forced to text mode regardless
+ * of a `.gitattributes -diff` marker. `--no-renames` means a move/rename is
+ * a delete (old path) plus an add (new path), each scanned independently and
+ * normally (H2, round 4) — with rename detection on, a moved binary file's
+ * old path vanishes into a single R(ename) record that this tool does not
+ * specially parse, so treating every changed path as its own add or delete
+ * is what keeps ordinary asset reshuffling from going INERT. The parsed
+ * added-line count is cross-checked against a separate `git diff --numstat`
+ * run (same flags): any disagreement not explained by a binary file (see
+ * BINARY FILES IN THE DIFF) is INERT. IMPORTANT — this does NOT mean a NUL
+ * byte, or any other content shape, can make the tool treat a file as unseen:
+ * see the next section for what "explained by a binary file" actually covers,
+ * and why it is narrower than that.
  *
- * BINARY FILES IN THE DIFF (not the corpus — see SCOPE above for that): a
- * file `--numstat` reports as binary (`-` for both counts, which `--text`
- * does not prevent for every case) is excluded from both the added-line
- * cross-check and from shingling — counted AND NAMED (the path is from the
- * public PR, never the corpus, so naming it is safe) as "N binary file(s)
- * not scanned," never silently folded into a clean result. Every other file
- * in the same diff is still scanned normally. numstat's verdict is itself
- * attacker-influenceable (see THE DIFF SIDE CANNOT BE EMPTIED above — a
- * `.gitattributes -diff` marker makes numstat say "-" for a file `--text`
- * still shows as real content), so a "-" row is only trusted as genuinely
- * binary once the file's actual HEAD content backs it up: a NUL in its first
- * 8KB, same heuristic as the corpus side. If numstat says binary but the
- * content doesn't, that disagreement is INERT, not a silent exclusion — an
- * excluded path is never scanned again, so trusting a false "binary" verdict
- * would be exactly the empty-diff evasion this section exists to close.
+ * BINARY FILES IN THE DIFF (not the corpus — see SCOPE above for that; and
+ * NOT a content-based exemption — see H1 below): a file `--numstat` reports
+ * as binary (`-` for both counts, which `--text` does not prevent for every
+ * case) is excluded from the added-line cross-check ONLY — counted AND
+ * NAMED (the path is from the public PR, never the corpus, so naming it is
+ * safe) as "N binary file(s) excluded from the line-count cross-check."
+ * Every file's '+' lines, binary-flagged or not, are still turned into runs
+ * and shingled exactly the same way — see extractAddedRuns and H1 below.
+ * numstat and the full patch can list a path differently when it needs
+ * quoting (a tab, a literal quote, a non-ASCII byte): numstat with `-z`
+ * gives it raw, the patch's "+++ " header still quotes it, and there is no
+ * flag that makes the two agree on one string. So a binary file's exclusion
+ * from the cross-check is correlated by POSITION (both list changed files in
+ * the same order for the same base/head/flags) rather than by path string —
+ * see the comment on `fileOrder` in extractAddedRuns.
+ *
+ * H1 (round 4): round 3 also required a numstat-binary verdict to be backed
+ * up by the file's actual HEAD content (a NUL in its first 8KB) before
+ * trusting it, and went INERT on any file where that check disagreed with
+ * numstat. That content check is REMOVED, not tightened: a single NUL byte
+ * anywhere in an otherwise-ordinary text file made the ENTIRE file invisible
+ * to the search under that design — exactly the "one byte past the
+ * detector" pattern a private-corpus scrub exists to catch, not produce. The
+ * fix is not a better binary check; it's making sure nothing but the
+ * numeric cross-check depends on the answer to "is this binary" at all. A
+ * `.gitattributes -diff` marker attempting the same trick — making numstat
+ * call a real text file binary — now simply fails to hide anything, because
+ * the file is scanned regardless of what numstat says about it.
  *
  * REF INJECTION: --base/--head are verified with
  * `git rev-parse --verify --end-of-options <ref>` before they are used in any
@@ -296,14 +344,21 @@ function decode(bytes: Uint8Array): string {
 
 /**
  * Every run of whitespace (space, tab, CR, LF, NBSP, ...) collapses to one
- * space, and zero-width characters are stripped outright — `\s` does not
- * treat U+200B (zero-width space), U+200C/U+200D (joiners), or U+FEFF
- * (zero-width no-break space / BOM) as whitespace, but left alone any of them
- * sitting mid-word would silently split what a human reads as one word into
- * two shingle tokens.
+ * space, and a fixed set of non-whitespace characters is stripped outright
+ * because leaving them in place would silently corrupt tokenisation:
+ *   - U+200B (zero-width space), U+200C/U+200D (joiners), U+FEFF (zero-width
+ *     no-break space / BOM) — invisible, and `\s` does not treat them as
+ *     whitespace, so left alone one sitting mid-word would split what a
+ *     human reads as one word into two shingle tokens.
+ *   - U+0000 (NUL) — round 4's H1 finding: a NUL glued directly onto a word
+ *     (no surrounding real whitespace) is not whitespace either, so leaving
+ *     it in place turned "\0The" into a token that will never equal "The" —
+ *     a single byte silently defeating the match. Stripping it, the same as
+ *     the zero-width characters, closes that without exempting the file
+ *     that carries it from being scanned at all (see extractAddedRuns).
  */
 function normalizeWhitespace(text: string): string {
-  return text.replace(/[​-‍﻿]/g, "").replace(/\s+/g, " ").trim();
+  return text.replace(/[\u0000​-‍﻿]/g, "").replace(/\s+/g, " ").trim();
 }
 
 /** n-word windows out of already-normalised (single-space-separated) text. */
@@ -324,10 +379,20 @@ function shingleWindows(normalized: string, n: number): string[] {
  * way, and the control (compared against the corpus's OWN, separately-built
  * shingle set) catches the disagreement instead of silently reporting clean.
  */
-function runsToShingles(runs: string[], n: number): Set<string> {
-  const out = new Set<string>();
+// Counts, not a Set: the control (below) is injected as one more run
+// alongside the real diff's runs, in the SAME call, so a shingle that is
+// genuinely present in the diff AND happens to equal the control's own
+// fragment must still be reportable — a plain Set would collapse the two
+// occurrences into one and there would be no way to tell them apart. The
+// count says whether a shingle's presence is explained ENTIRELY by the
+// control (never reported — it's corpus content) or partly/wholly by the
+// diff's own runs (reportable — it's the PR's own content).
+function runsToShingles(runs: string[], n: number): Map<string, number> {
+  const out = new Map<string, number>();
   for (const r of runs) {
-    for (const s of shingleWindows(normalizeWhitespace(r), n)) out.add(s);
+    for (const s of shingleWindows(normalizeWhitespace(r), n)) {
+      out.set(s, (out.get(s) ?? 0) + 1);
+    }
   }
   return out;
 }
@@ -349,15 +414,38 @@ function runsToShingles(runs: string[], n: number): Set<string> {
  * not misread as a file header. Anchoring to the header's own fixed shape
  * (marker, then a space, then a path) tells the two apart.
  *
- * `binaryPaths` (from the --numstat cross-check) excludes a file's '+' lines
- * from both the run output and plusLineCount — they were never counted on
- * the --numstat side either, so the two stay comparable (G4).
+ * NOTHING is exempt from being turned into runs here — not a binary file,
+ * not a file numstat calls binary, not a file with a NUL anywhere in it.
+ * `--text` (see buildDiffArgs) already forces every file's added bytes into
+ * this same '+'-line patch format, so every file's content is scanned the
+ * same way (H1, round 4): a single NUL byte, or any other content shape,
+ * cannot exempt a file from the search — there is no content-based check
+ * here to evade. `fileOrder` (added-line count per file, IN FILE ORDER)
+ * exists ONLY so the caller can subtract a numstat-binary-flagged file's
+ * contribution back out of the numeric cross-check — never to decide what
+ * gets scanned. See the comment on `fileOrder`'s declaration for why it is
+ * positional rather than keyed by path.
  */
-function extractAddedRuns(diffText: string, binaryPaths: Set<string>): { runs: string[]; plusLineCount: number } {
+// `fileOrder` correlates with --numstat's rows by POSITION, not by path
+// string: git always quotes a path containing a tab, a newline, a literal
+// quote, or (by default) a non-ASCII byte in the FULL PATCH ("+++ " lines),
+// but `--numstat -z` gives that same path raw and unquoted — there is no
+// flag that makes the two agree on a shared string representation, and
+// writing a full C-style path unquoter to bridge them is more risk (a buggy
+// reassembly of a multi-byte-escaped path silently matching the wrong file)
+// than it's worth for what is, even among binary files, a rare path shape.
+// Position is unambiguous instead: `git diff` and `git diff --numstat`
+// enumerate the same changed paths in the same order for the same
+// (base, head, flags) — see the corpus-overlap.test.ts test that pins this
+// order against a five-file mixed diff. A file whose path needed quoting is
+// still correctly excluded from the cross-check; it just cannot be spelled
+// out by name in the exclusion report as cleanly as an unquoted one can.
+function extractAddedRuns(diffText: string): { runs: string[]; plusLineCount: number; fileOrder: number[] } {
   const runs: string[] = [];
+  const fileOrder: number[] = [];
   let current: string[] = [];
   let plusLineCount = 0;
-  let currentFile: string | null = null;
+  let inFile = false;
   const flush = () => {
     if (current.length > 0) {
       runs.push(current.join(" "));
@@ -367,8 +455,8 @@ function extractAddedRuns(diffText: string, binaryPaths: Set<string>): { runs: s
   for (const raw of diffText.split("\n")) {
     if (raw.startsWith("+++ ")) {
       flush();
-      const p = raw.slice(4).trim();
-      currentFile = p === "/dev/null" ? null : p.replace(/^b\//, "");
+      fileOrder.push(0);
+      inFile = true;
       continue;
     }
     if (raw.startsWith("--- ") || raw.startsWith("@@") || raw.startsWith("diff --git ")) {
@@ -376,9 +464,9 @@ function extractAddedRuns(diffText: string, binaryPaths: Set<string>): { runs: s
       continue;
     }
     if (raw.startsWith("+")) {
-      if (currentFile !== null && binaryPaths.has(currentFile)) continue; // G4: excluded, not scanned
       current.push(raw.slice(1));
       plusLineCount++;
+      if (inFile) fileOrder[fileOrder.length - 1]! += 1;
       continue;
     }
     if (raw.startsWith("-")) {
@@ -387,18 +475,7 @@ function extractAddedRuns(diffText: string, binaryPaths: Set<string>): { runs: s
     flush(); // context, "\ No newline at end of file", index lines, etc.
   }
   flush();
-  return { runs, plusLineCount };
-}
-
-/**
- * Wraps a raw text fragment as a synthetic single-file, single-hunk unified
- * diff whose only content is that fragment as added ('+') lines — so the
- * control (G1) can be parsed by the REAL extractAddedRuns, not a hand-rolled
- * copy of what it does.
- */
-function syntheticAddedDiffText(rawFragment: string): string {
-  const lines = rawFragment.split("\n").map((l) => "+" + l);
-  return ["+++ b/__corpus_overlap_control__", "@@ -0,0 +1 @@", ...lines, ""].join("\n");
+  return { runs, plusLineCount, fileOrder };
 }
 
 /**
@@ -668,36 +745,29 @@ function corpusHas(shingle: string): boolean {
   return corpus.shingles.has(shingle);
 }
 
-// ---------------------------------------------------------------------------
-// Control (G1): the corpus's own shingle Set can never disprove itself, so
-// the control instead draws a raw fragment from the corpus and runs it
-// through the REAL diff-side pipeline — extractAddedRuns, then
-// runsToShingles — checked against corpusHas, the same lookup the real
-// search uses. Never printed; it is corpus content.
-// ---------------------------------------------------------------------------
-
-if (corpus.controlFragment === null) {
-  inert(
-    `no run of ${shingleSize} words could be found anywhere in the searched corpus content — the search was never ` +
-      "proven capable of finding a match, so a clean result would be meaningless.",
-  );
-}
-
-const { runs: controlRuns } = extractAddedRuns(syntheticAddedDiffText(corpus.controlFragment), new Set());
-const controlShingles = runsToShingles(controlRuns, shingleSize);
-if (![...controlShingles].some((s) => corpusHas(s))) {
-  inert(
-    "a fragment drawn from the corpus, run through the exact diff-side pipeline (extractAddedRuns → " +
-      "runsToShingles) used for the real diff, produced no shingle present in the corpus's own index — the " +
-      "search was never proven capable of finding a match.",
-  );
+/**
+ * Which of these shingles the corpus contains. The real search and the
+ * control (below) both call this SAME function on data that has been
+ * combined into the SAME set — not two parallel computations that happen
+ * to use the same helper. A mutation that disables this lookup, or that
+ * hardcodes the real diff's shingle set to empty, breaks the control
+ * identically to how it breaks the real search, because by the time this
+ * runs there is no longer a "real search" and a "control" to tell apart.
+ */
+function findMatches(shingles: Iterable<string>, has: (shingle: string) => boolean): string[] {
+  const out: string[] = [];
+  for (const s of shingles) {
+    if (has(s)) out.push(s);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // The diff: added lines between --base and --head, in THIS repo. Forced to
 // text mode so the PR under scan cannot empty its own diff (F2). --numstat
-// runs FIRST so binary paths (G4) are known before the unified diff is
-// parsed, and both stay excluded from the cross-check symmetrically.
+// runs FIRST so binary paths (H1) are known before the unified diff is
+// parsed, purely to exclude them from the numeric cross-check below — they
+// are NOT excluded from scanning; see extractAddedRuns.
 // ---------------------------------------------------------------------------
 
 // --end-of-options MUST be the last option before the (positional) refs —
@@ -705,8 +775,8 @@ if (![...controlShingles].some((s) => corpusHas(s))) {
 // appended by buildDiffArgs(), never hardcoded ahead of a variable option.
 // --no-renames keeps every path in --numstat and the unified diff spelled
 // identically — a detected rename would show `old => new` in --numstat but
-// a plain path in "+++ b/new", breaking the exact-string match G4's binary-
-// path exclusion depends on.
+// a plain path in "+++ b/new". With it, a rename is a delete (old path) plus
+// an add (new path), each independently and normally scanned (H2).
 const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "--no-renames"];
 function buildDiffArgs(extra: string[] = []): string[] {
   return ["diff", ...DIFF_FLAGS, ...extra, "--end-of-options", baseRef, headRef];
@@ -716,76 +786,131 @@ function buildDiffArgs(extra: string[] = []): string[] {
 // implies -p and prints the full patch body after the numstat summary
 // (--unified/-U is itself a "generate a patch" flag) — the numstat call
 // below omits it so its output stays a pure, easily-parsed summary table.
-/**
- * numstat's binary verdict is itself attacker-influenceable (a `.gitattributes
- * -diff` marker makes numstat print "-" for a file that --text still shows as
- * real line content in the patch — this is F2's original attack, not a new
- * one). So a numstat "-" row is only trusted as GENUINELY binary if the
- * file's actual HEAD content backs it up (a NUL in the first 8KB, the same
- * heuristic used on the corpus side). If numstat says binary but the content
- * says otherwise, that disagreement is exactly the thing INERT exists to
- * catch — excluding the path would silently hide real, scannable text.
- */
-function isActuallyBinaryAtHead(path: string): boolean | null {
-  const shown = run(["git", "show", `${headRef}:${path}`], root);
-  if (!shown.ok) return null; // couldn't verify — caller must not trust it either way
-  const window = shown.stdout.subarray(0, Math.min(8000, shown.stdout.length));
-  return window.includes(0);
-}
-
-const numstat = run(["git", ...buildDiffArgs(["--numstat"])], root);
+// -z: raw, unquoted paths, NUL-separated records — needed for the ORDER
+// correlation with the patch's file sections (see extractAddedRuns's comment
+// on `fileOrder`), and a nicer display path when a binary file is named in
+// the report below.
+const numstat = run(["git", ...buildDiffArgs(["--numstat", "-z"])], root);
 if (!numstat.ok) {
   inert(`git diff --numstat failed — the added-line count could not be cross-checked.`);
 }
-const binaryPaths = new Set<string>();
+// H1: numstat's "-"/"-" (binary) verdict is used ONLY to know which files'
+// added-line counts to leave out of the cross-check arithmetic below. It is
+// NEVER used to decide what gets scanned — nothing does; see
+// extractAddedRuns. So there is nothing here to verify or distrust: a false
+// "binary" verdict (e.g. from a `.gitattributes -diff` marker) costs this
+// file its place in the numeric cross-check, not its place in the search.
+interface NumstatRow {
+  path: string;
+  isBinary: boolean;
+  added: number; // 0 for a binary row; the field is meaningless there
+}
+const numstatRows: NumstatRow[] = [];
 let numstatAdded = 0;
-for (const line of decode(numstat.stdout).split("\n")) {
-  if (line.trim().length === 0) continue;
-  const parts = line.split("\t");
+for (const record of decode(numstat.stdout).split("\0")) {
+  if (record.length === 0) continue;
+  const parts = record.split("\t");
   if (parts.length < 3) {
-    inert("git diff --numstat produced an unparsable line — the added-line count could not be cross-checked.");
+    inert("git diff --numstat produced an unparsable record — the added-line count could not be cross-checked.");
   }
   const addedStr = parts[0]!;
   const deletedStr = parts[1]!;
-  const path = parts.slice(2).join("\t");
+  const path = parts.slice(2).join("\t"); // a literal tab in the path is possible; only the first two fields are counts
   if (addedStr === "-" || deletedStr === "-") {
-    const actuallyBinary = isActuallyBinaryAtHead(path);
-    if (actuallyBinary !== true) {
-      inert(
-        `git diff --numstat reported "${path}" as binary, but its HEAD content ${
-          actuallyBinary === false ? "contains no NUL bytes in the first 8KB" : "could not be independently verified"
-        } — refusing to trust a diff read that disagrees with itself (a .gitattributes -diff marker can force this ` +
-          "false classification without changing a single byte of real content).",
-      );
-    }
-    // G4: genuinely binary, confirmed by content. Excluded from the numeric
-    // cross-check on both sides — never silently folded into "clean," always
-    // counted below.
-    binaryPaths.add(path);
+    numstatRows.push({ path, isBinary: true, added: 0 });
     continue;
   }
   const added = Number.parseInt(addedStr, 10);
   if (!Number.isInteger(added)) {
     inert("git diff --numstat produced a non-numeric added-line count — cannot trust the cross-check.");
   }
+  numstatRows.push({ path, isBinary: false, added });
   numstatAdded += added;
 }
+const binaryPaths = new Set(numstatRows.filter((r) => r.isBinary).map((r) => r.path));
 
 const diff = run(["git", ...buildDiffArgs(["--unified=0"])], root);
 if (!diff.ok) {
   inert(`git diff failed — the diff could not be read.`);
 }
-const { runs: addedRuns, plusLineCount } = extractAddedRuns(decode(diff.stdout), binaryPaths);
+const { runs: addedRuns, plusLineCount, fileOrder } = extractAddedRuns(decode(diff.stdout));
 
-if (numstatAdded !== plusLineCount) {
+// The cross-check compares like with like: numstatAdded already excludes
+// binary-flagged rows (H1), so their contribution to plusLineCount (however
+// many pseudo-lines --text produced for them — irrelevant to this check,
+// relevant only to the search below) is subtracted out here too, correlated
+// by POSITION (see extractAddedRuns's comment on `fileOrder`) rather than by
+// path string. A deleted or renamed-away binary file contributes 0 either
+// way (H2) — nothing to verify, nothing to go INERT over.
+if (fileOrder.length !== numstatRows.length) {
   inert(
-    `added-line count mismatch (after excluding ${binaryPaths.size} binary file(s) from both sides): the unified ` +
-      `diff parsed ${plusLineCount} added line(s), --numstat reports ${numstatAdded} — refusing to trust a diff ` +
-      "read that disagrees with itself.",
+    `git diff and git diff --numstat listed a different number of changed files (${fileOrder.length} vs ` +
+      `${numstatRows.length}) for the same base/head — refusing to trust a diff read that disagrees with itself.`,
+  );
+}
+let binaryPlusLines = 0;
+numstatRows.forEach((row, i) => {
+  if (row.isBinary) binaryPlusLines += fileOrder[i] ?? 0;
+});
+const textOnlyPlusLineCount = plusLineCount - binaryPlusLines;
+
+if (numstatAdded !== textOnlyPlusLineCount) {
+  inert(
+    `added-line count mismatch (after excluding ${binaryPaths.size} binary file(s) from the cross-check): the ` +
+      `unified diff parsed ${textOnlyPlusLineCount} non-binary added line(s), --numstat reports ${numstatAdded} — ` +
+      "refusing to trust a diff read that disagrees with itself.",
   );
 }
 
-const allShingles = runsToShingles(addedRuns, shingleSize);
+// ---------------------------------------------------------------------------
+// Control (G1): the corpus's own shingle Set can never disprove itself, so
+// the control draws a raw (pre-normalisation) fragment from the corpus and
+// injects it as one more element of `addedRuns` — not a parallel
+// computation, THE SAME array the real diff's shingles come from — before
+// the shared runsToShingles() and findMatches() calls run. A mutation that
+// empties the real diff's shingle set, or that breaks either shared
+// function, takes the control down with it, because by this point there is
+// no separate "control path" left to accidentally leave untouched. Never
+// printed; it is corpus content.
+// ---------------------------------------------------------------------------
+
+if (corpus.controlFragment === null) {
+  inert(
+    `no run of ${shingleSize} words could be found anywhere in the searched corpus content — the search was never ` +
+      "proven capable of finding a match, so a clean result would be meaningless.",
+  );
+}
+
+const controlRun = corpus.controlFragment;
+// controlCounts is used only to tell provenance apart below (a bookkeeping
+// read, not the security decision); allShingles — built from addedRuns AND
+// controlRun in ONE call — is the shared, sabotage-sensitive source of truth
+// both the control's pass/fail AND the real search's matches come from.
+const controlCounts = runsToShingles([controlRun], shingleSize);
+const allShingles = runsToShingles([...addedRuns, controlRun], shingleSize);
+const matches = findMatches(allShingles.keys(), corpusHas);
+
+if (![...controlCounts.keys()].some((s) => matches.includes(s))) {
+  inert(
+    "a fragment drawn from the corpus, run through the real diff-side shingling and matching path, produced no " +
+      "shingle present in the corpus's own index — the search was never proven capable of finding a match.",
+  );
+}
+
+// A matched shingle is genuinely from the diff (reportable — it's the PR's
+// own content) if its combined count exceeds what the control run ALONE
+// would have contributed. A shingle explained ENTIRELY by the injected
+// control fragment (combined count equals the control's own count) is
+// corpus content and is never reported — but one that ALSO happens to
+// appear in the real diff (combined count is higher) still is: a Set-based
+// "not equal to the control shingle" filter would have wrongly dropped that
+// case, silently losing a real match that happens to coincide with whatever
+// text the control drew.
+function fromRealDiff(shingle: string): boolean {
+  return (allShingles.get(shingle) ?? 0) > (controlCounts.get(shingle) ?? 0);
+}
+
+const rawMatches = matches.filter(fromRealDiff);
 
 // ---------------------------------------------------------------------------
 // The benign list — loaded from --base, never --head. A malformed file at
@@ -860,14 +985,9 @@ const benignEntries = loadBenignList();
 const benignByShingle = new Map<string, BenignEntry>();
 for (const entry of benignEntries) benignByShingle.set(entry.shingle, entry);
 
-// ---------------------------------------------------------------------------
-// Search: an in-memory set intersection, not a subprocess per shingle.
-// ---------------------------------------------------------------------------
-
-const rawMatches: string[] = [];
-for (const shingle of allShingles) {
-  if (corpusHas(shingle)) rawMatches.push(shingle);
-}
+// rawMatches (an in-memory set intersection, not a subprocess per shingle)
+// was already computed above, via the SAME findMatches() call the control
+// used — see "Control (G1)".
 
 const unreviewed: string[] = [];
 const honoured: string[] = [];
@@ -887,13 +1007,16 @@ for (const entry of benignEntries) {
 // Report — shingle text and counts only. Never a corpus path or line.
 // ---------------------------------------------------------------------------
 
-console.log(`corpus-overlap: ${allShingles.size} shingle(s) drawn from ${plusLineCount} added line(s).`);
+// allShingles has the control's own shingle(s) mixed in — count only the
+// ones with real provenance in the diff, same rule as rawMatches above.
+const diffShingleCount = [...allShingles.keys()].filter(fromRealDiff).length;
+console.log(`corpus-overlap: ${diffShingleCount} shingle(s) drawn from ${plusLineCount} added line(s).`);
 if (binaryPaths.size > 0) {
-  // Named, not just counted — these paths are from the PUBLIC PR under
-  // scan, never the corpus, so naming them is safe and is what makes "not
-  // scanned" actually actionable: a reviewer who sees a *.txt or *.js path
-  // in this list, not an image, knows to look at it by hand.
-  console.log(`corpus-overlap: ${binaryPaths.size} binary file(s) not scanned:`);
+  // Named, not just counted — these paths are from the PUBLIC PR under scan,
+  // never the corpus, so naming them is safe. H1: excluded from the numeric
+  // cross-check only — every one of them was still scanned like any other
+  // file above (there is no content-based exemption to evade).
+  console.log(`corpus-overlap: ${binaryPaths.size} binary file(s) excluded from the line-count cross-check:`);
   for (const path of binaryPaths) {
     console.log(`  - ${path}`);
   }

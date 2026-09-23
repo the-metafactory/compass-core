@@ -246,31 +246,79 @@ describe("corpus-overlap.ts — F2: the diff side cannot be emptied by the PR un
     expect(r.output).toContain(PLANTED_PHRASE);
   });
 
-  test("INJECTED: added file contains a NUL byte (genuinely binary, confirmed by content) → OBSERVED: excluded and named, never silently folded into clean (G4 supersedes the round-1 blanket INERT here)", () => {
-    // As of G4, a file numstat calls binary is only excluded once its actual
-    // HEAD content confirms a real NUL byte (isActuallyBinaryAtHead) — a
-    // genuine NUL-byte file passes that check, so it is now excluded and
-    // reported by name rather than making the whole run INERT. The content
-    // hidden inside it (even a real leak) is not caught by THIS run — that
-    // is the accepted, documented trade-off for not blocking every PR that
-    // touches a real binary file (§4c). What must never happen is SILENCE:
-    // the exclusion is always named.
+  test("INJECTED: a single leading NUL byte in a .md file, followed by the planted phrase → OBSERVED: exit 1, caught (H1: no NUL-based exemption anywhere in the diff)", () => {
+    // Round 3's design exempted a file from the SCAN once numstat AND
+    // content both agreed it was binary. Round 4's finding (H1): that
+    // exemption is itself the evasion — a single NUL byte, anywhere,
+    // silently removed a file from the search entirely (exit 0, "0 shingles
+    // drawn"), which is exactly the #30 "one byte to beat the detector"
+    // pattern. The fix removes the exemption: --text already puts every
+    // added byte into the patch as '+' lines, so every file is scanned the
+    // same way regardless of NUL content; only the numstat CROSS-CHECK
+    // treats a numstat-binary file specially (excludes it from the count
+    // comparison, never from the search).
     const corpus = makeCorpus();
     const consumer = join(workDir, "consumer");
     initRepo(consumer);
     const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
-    writeFileSync(join(consumer, "added.bin"), `lead\x00in\n${PLANTED_PHRASE} continues.\n`);
-    commit(consumer, ["added.bin"], "head");
+    writeFileSync(join(consumer, "notes.md"), `\x00${PLANTED_PHRASE} continues.\n`);
+    commit(consumer, ["notes.md"], "head");
     const head = git(["rev-parse", "HEAD"], consumer);
 
     const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
 
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("1 binary file(s) not scanned");
-    expect(r.stdout).toContain("added.bin");
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
   });
 
-  test("INJECTED: a NUL-byte binary file AND a separate real leak in a normal text file, same PR → OBSERVED: the binary file is excluded and named, the text file's match is still caught (exit 1)", () => {
+  test("INJECTED: a NUL byte after 7KB of padding, then the planted phrase (the reviewer's 'NUL after 7KB' probe) → OBSERVED: exit 1, caught", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const padding = "x".repeat(7000);
+    writeFileSync(join(consumer, "notes.md"), `${padding}\n\x00\n${PLANTED_PHRASE} continues.\n`);
+    commit(consumer, ["notes.md"], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: an added 'data.bin' that is really text, carrying the planted phrase → OBSERVED: exit 1, caught (an unfamiliar extension is not a reason to skip)", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "data.bin", `${PLANTED_PHRASE} continues.\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: a real binary file (PNG header + NUL bytes) with the planted phrase appended → OBSERVED: exit 1, caught", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00]);
+    const appended = Buffer.from(`\n${PLANTED_PHRASE} continues.\n`, "utf8");
+    writeFileSync(join(consumer, "asset.bin"), Buffer.concat([pngHeader, appended]));
+    commit(consumer, ["asset.bin"], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: a NUL-byte binary file (no leak) alongside a separate real leak in a normal text file, same PR → OBSERVED: the binary file is excluded (by name) from the line-count cross-check only; the text file's match is still caught (exit 1)", () => {
     const corpus = makeCorpus();
     const consumer = join(workDir, "consumer");
     initRepo(consumer);
@@ -287,7 +335,7 @@ describe("corpus-overlap.ts — F2: the diff side cannot be emptied by the PR un
 
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain(PLANTED_PHRASE);
-    expect(r.stdout).toContain("1 binary file(s) not scanned");
+    expect(r.stdout).toContain("1 binary file(s) excluded from the line-count cross-check");
     expect(r.stdout).toContain("added.bin");
   });
 
@@ -900,6 +948,80 @@ describe("corpus-overlap.ts — G1: the control exercises the real diff-side pat
     expect(output).toContain("INERT");
   });
 
+  test("INJECTED: the search loop's lookup is disabled (findMatches's `if (has(s))` short-circuited to false) → OBSERVED: INERT, exit 2 (round 3's wiring gap: the search loop was NOT shared with the control, so this mutation previously gave exit 0, clean)", () => {
+    // The control's own pipeline functions (extractAddedRuns, runsToShingles,
+    // corpusHas) were verified in round 3, but the SEARCH LOOP itself — the
+    // thing that decides which shingles count as matches — was a separate
+    // for-loop the control never touched. Round 4 pulls that loop out into
+    // findMatches() and routes the control through it too, so disabling the
+    // loop's own condition breaks the control identically to the real search.
+    const mutatedTool = mutate("if (has(s)) out.push(s);", "if (false && has(s)) out.push(s);");
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("INJECTED: the real diff's shingle set is hardcoded to empty (allShingles = new Map()) → OBSERVED: INERT, exit 2 (round 3's wiring gap: the control built its OWN separate shingle set, so this mutation previously gave exit 0, clean)", () => {
+    // Round 3's control computed its shingles from a synthetic diff it built
+    // itself — a parallel computation, unaffected by whatever the REAL
+    // diff's shingle-set assignment did. Round 4 injects the control
+    // fragment as one more element of the SAME array (addedRuns) before the
+    // ONE call that produces allShingles, so hardcoding that one assignment
+    // to empty also erases the control's own contribution — there is no
+    // longer a separate "control path" this mutation can leave untouched.
+    const mutatedTool = mutate(
+      "const allShingles = runsToShingles([...addedRuns, controlRun], shingleSize);",
+      "const allShingles = new Map<string, number>();",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("a real diff match that coincidentally equals the control's own drawn fragment is still reported, not silently dropped as 'control content'", () => {
+    // makeCorpus()'s planted phrase IS the corpus's own first n words, which
+    // is also exactly what the control draws from (ls-tree order, first
+    // blob, first n words) — so every other test in this file that plants
+    // PLANTED_PHRASE already exercises this collision. This test names the
+    // property directly: a Set-based "exclude anything equal to the control
+    // shingle" filter would have silently dropped this exact match (a real
+    // provenance bug caught while building the round-4 fix, not merely a
+    // hypothetical) — the count-based provenance check must not regress it.
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+    expect(r.stdout).toContain("1 match(es)");
+  });
+
   test("the UNMUTATED tool still passes cleanly on the same fixtures (sanity: the mutations above are real breakages, not false positives)", () => {
     const corpus = makeCorpus();
     const consumer = join(workDir, "consumer");
@@ -999,7 +1121,7 @@ describe("corpus-overlap.ts — G2/G3: multi-ref scope, printed on every run", (
 // -----------------------------------------------------------------------------
 
 describe("corpus-overlap.ts — G4: binary files scan the rest of the diff, but can't fake it", () => {
-  test("INJECTED: a PR adds a real PNG (binary) next to a text caption carrying a real match → OBSERVED: the PNG is excluded and named, the caption's match is still caught, exit 1", () => {
+  test("INJECTED: a PR adds a real PNG (binary) next to a text caption carrying a real match → OBSERVED: the PNG is excluded (by name) from the line-count cross-check, the caption's match is still caught, exit 1", () => {
     const corpus = makeCorpus();
     const consumer = join(workDir, "consumer");
     initRepo(consumer);
@@ -1017,11 +1139,11 @@ describe("corpus-overlap.ts — G4: binary files scan the rest of the diff, but 
 
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain(PLANTED_PHRASE);
-    expect(r.stdout).toContain("1 binary file(s) not scanned");
+    expect(r.stdout).toContain("1 binary file(s) excluded from the line-count cross-check");
     expect(r.stdout).toContain("hero.png");
   });
 
-  test("INJECTED: .gitattributes '-diff' forces numstat to call a real TEXT file binary → OBSERVED: still INERT — a false 'binary' verdict is refused, not silently excluded (regression guard: this is F2's original attack)", () => {
+  test("INJECTED: .gitattributes '-diff' forces numstat to call a real TEXT file binary → OBSERVED: still caught, exit 1 (H1: nothing is exempt from the SCAN — numstat's verdict only ever affected the cross-check, so the evasion has nothing left to exploit; regression guard for F2's original attack)", () => {
     const corpus = makeCorpus();
     const consumer = join(workDir, "consumer");
     initRepo(consumer);
@@ -1035,11 +1157,8 @@ describe("corpus-overlap.ts — G4: binary files scan the rest of the diff, but 
 
     const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
 
-    expect(r.exitCode).toBe(2);
-    expect(r.stderr).toContain("INERT");
-    // Must NOT be the silent-exclusion path — it must say the verdict was
-    // distrusted, not just report a binary-file count.
-    expect(r.stderr).toContain("disagrees with itself");
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
   });
 
   test("INJECTED: an added line's content starts with '++' (e.g. '++counter;') → OBSERVED: read as content, not misread as a '+++' file header — no false INERT", () => {
@@ -1053,6 +1172,121 @@ describe("corpus-overlap.ts — G4: binary files scan the rest of the diff, but 
 
     expect(r.exitCode).toBe(0); // clean — the content just doesn't match the corpus
     expect(r.stderr).not.toContain("INERT");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// H2 (round 4): deleting or moving a binary file must never make the run
+// INERT. With --no-renames, a move/rename is a delete (old path) plus an add
+// (new path); a deleted path contributes no '+' lines either way, and round
+// 4 removed the only code that used to read a path's HEAD content (H1's
+// content-verification step, now gone) — so there is nothing left that could
+// fail to read a path that no longer exists at head.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — H2: deleting or moving a binary file never goes INERT", () => {
+  test("INJECTED: a PR deletes a binary image and separately edits a text file with a real match → OBSERVED: exit 1 on the text match, never INERT", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const pngBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(100, 0),
+    ]);
+    writeFileSync(join(consumer, "old-hero.png"), pngBytes);
+    const base = commit(
+      consumer,
+      ["old-hero.png", write(consumer, "README.md", "hello\n")],
+      "base with an image to delete",
+    );
+    Bun.spawnSync(["git", "rm", "-q", "old-hero.png"], { cwd: consumer });
+    writeFileSync(join(consumer, "notes.txt"), `${PLANTED_PHRASE}\n`);
+    commit(consumer, ["-A"], "delete the image, add a text match");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).not.toContain("INERT");
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: a PR moves/renames a binary image (--no-renames sees this as delete+add) → OBSERVED: exit 0, clean, never INERT", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const pngBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(100, 0),
+    ]);
+    mkdirSync(join(consumer, "assets"), { recursive: true });
+    writeFileSync(join(consumer, "assets", "hero.png"), pngBytes);
+    const base = commit(consumer, ["assets/hero.png"], "base with an image to move");
+    Bun.spawnSync(["git", "mv", "assets/hero.png", "assets/hero-renamed.png"], { cwd: consumer });
+    commit(consumer, ["-A"], "move the image");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).not.toContain("INERT");
+  });
+
+  test("INJECTED: a binary path git must quote in the patch (contains a literal tab) → OBSERVED: correctly excluded from the cross-check by position, no false INERT from a quoting mismatch", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const weirdName = "weird\ttab.bin";
+    writeFileSync(join(consumer, weirdName), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]));
+    Bun.spawnSync(["git", "add", "-A"], { cwd: consumer });
+    Bun.spawnSync(
+      [
+        "git",
+        "-c",
+        "user.email=t@example.invalid",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "-m",
+        "add a tab-named binary",
+      ],
+      { cwd: consumer },
+    );
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).not.toContain("INERT");
+  });
+
+  test("--numstat and the full patch enumerate changed files in the SAME order (the invariant fileOrder correlation depends on), across a mixed text/binary/quoted-path diff", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    write(consumer, "a.txt", `${PLANTED_PHRASE}\n`);
+    writeFileSync(join(consumer, "b_binary.bin"), Buffer.from([0, 1, 2, 3]));
+    write(consumer, "c.txt", "unrelated clean content\n");
+    writeFileSync(join(consumer, "d\ttab.bin"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]));
+    write(consumer, "e.txt", "more unrelated clean content\n");
+    Bun.spawnSync(["git", "add", "-A"], { cwd: consumer });
+    Bun.spawnSync(
+      ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "mixed files"],
+      { cwd: consumer },
+    );
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    // Both binary files correctly excluded from the cross-check (no INERT,
+    // no count mismatch), and the real text match (in the FIRST file, before
+    // either binary file) is still correctly attributed and caught.
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+    expect(r.stdout).toContain("2 binary file(s) excluded from the line-count cross-check");
   });
 });
 

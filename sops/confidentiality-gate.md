@@ -187,57 +187,74 @@ or line**: the corpus is private, and this is the same withholding discipline as
 NEVER-ECHO rule (§0).
 
 **Scope — searched every run, printed every run (`--refs HEAD|all`, default `all`):** by default
-the tool searches every blob reachable from every local branch, remote-tracking branch, and tag
-tip, deduplicated by content — not HEAD alone. `--refs HEAD` narrows it back to HEAD only, which
-is faster but searches less; the first line of every run states which was used, plus refs
-searched, paths reachable, blobs read, and total bytes, so the scope is never a guess. Three
-things are **never folded silently into a clean result**, and are always counted (never just
-"0 matches"):
+the tool searches every blob in the **tip tree** of every local branch, remote-tracking branch,
+and tag — not HEAD alone, and not "every reachable blob" in git's own sense of reachable, which
+includes history this tool does not walk (see below). `--refs HEAD` narrows it to HEAD's tip tree
+only, which is faster but searches less; the first line of every run states which was used, plus
+refs searched, paths reachable, blobs fetched, and total bytes fetched (searched and not — see the
+binary paragraph below), so the scope is never a guess. Three things are **never folded silently
+into a clean result**, and are always counted (never just "0 matches"):
   - **gitlinks/submodules** — `ls-tree` entries of type `commit` point at a separate repository
     this tool does not follow. Counted as not searched.
   - **binary corpus blobs** — content with a NUL in its first 8KB (the same heuristic
-    `leak-check.ts` uses) is counted as not searched, never shingled.
+    `leak-check.ts` uses) is counted as not searched, never shingled. This heuristic applies to the
+    corpus side only — the diff side deliberately has no NUL-based check at all; see the
+    binary-files-in-the-diff paragraph below.
   - **UTF-16 corpus blobs** (BOM-detected, LE or BE) ARE decoded and searched, and counted
     separately in the "blobs read" line — a UTF-16 file with no BOM, or any other multi-byte
     encoding, is indistinguishable from binary to the NUL heuristic and is counted as binary.
-  Two things are **out of scope entirely**, invisible to any of the counts above because this tool
-  has no way to see them: content only in the corpus checkout's **uncommitted working tree or
-  index** (only committed, ref-reachable content is ever read), and the real content behind a
-  **Git LFS pointer file** (the pointer text is searched like any blob; the object it points to is
-  never fetched).
+  Four things are **out of scope entirely**, invisible to any of the counts above because this
+  tool has no way to see them:
+  - content only in the corpus checkout's **uncommitted working tree or index** (only committed,
+    tip-tree content is ever read);
+  - **history** — text that exists only in an older commit, not at any current ref's tip, is not
+    searched, by the tip-tree-only design above;
+  - **`refs/stash`** — the ref search asks for `refs/heads`, `refs/remotes`, and `refs/tags`
+    explicitly; a stash is none of those;
+  - the real content behind a **Git LFS pointer file** (the pointer text is searched like any
+    blob; the object it points to is never fetched).
 
 **Any git failure, anywhere in the read, is INERT — never treated as "no match."** The corpus read
 (refs, tree listings, the batched object read, and their own internal consistency — an object
 count or a byte count that doesn't add up) and the diff read (cross-checked against a second,
 independent `git diff --numstat` run) are both verified this way. Before trusting a clean result,
-the tool draws a raw, pre-normalisation fragment from the corpus and runs it through the **same
-diff-side pipeline a real added line goes through** (parse it as a synthetic added run, normalise,
-window into shingles, then look it up the same way a real match is looked up) — not a check that
-the corpus's own shingle set is merely non-empty, which can never fail once the corpus has been
-read at all and proves nothing about whether the diff side would actually find something real. If
-the two pipelines disagree about the exact same text, the run is INERT: that disagreement is the
+the tool draws a raw, pre-normalisation fragment from the corpus and injects it as one more element
+of the SAME array the real diff's added lines come from, before the one shared call that turns
+that array into shingles and the one shared function (`findMatches`) that both the control and the
+real search use to look them up — not a parallel computation of its own, and not a check that the
+corpus's own shingle set is merely non-empty, which can never fail once the corpus has been read at
+all and proves nothing about whether the diff side would actually find something real. (An earlier
+round of this design routed the control through the same *functions* as the real search without
+sharing the same *data* — a review found that a mutation disabling the search loop, or hardcoding
+the real diff's shingle set to empty, still passed the control and printed a false "clean." Sharing
+the array closes that.) If the control's own shingle produces no match, the run is INERT: the
 observable symptom of a broken lookup, a normalisation step that silently stopped running, or the
 corpus and diff sides drifting out of sync — not "the corpus is empty," which is a narrower and
 weaker claim.
 
 The diff read is hardened against the PR under scan controlling its own visibility: `git diff` runs
-with `--no-ext-diff --no-textconv --text --no-renames`, so a `.gitattributes` `-diff` marker, a
-`diff.external` config, or an embedded NUL byte cannot make the tool see an empty or binary-skipped
-diff. `--base` and `--head` are verified with `git rev-parse --verify --end-of-options` and refused
-outright if either looks like a flag (e.g. `--base=--output=<file>`) — a ref is data, never an
-option to the git commands it's passed to.
+with `--no-ext-diff --no-textconv --text --no-renames`, so a `.gitattributes` `-diff` marker or a
+`diff.external` config cannot make the tool see an empty diff. `--no-renames` means a move/rename
+is a delete (old path) plus an add (new path), each scanned independently — an ordinary asset
+reshuffle in a consuming repo must not need special handling. `--base` and `--head` are verified
+with `git rev-parse --verify --end-of-options` and refused outright if either looks like a flag
+(e.g. `--base=--output=<file>`) — a ref is data, never an option to the git commands it's passed to.
 
 **Binary files in the diff** (not the corpus — see Scope above for that) are handled, not treated
-as a reason to refuse the whole PR: a file `--numstat` reports as binary is excluded from both the
-added-line cross-check and from shingling, and every other file in the same diff still scans
-normally — a PR that adds an image alongside a text change gets a real result on the text change,
-not a blanket INERT. But `--numstat`'s "binary" verdict is itself something the PR under scan can
-influence (the same `.gitattributes -diff` marker above makes `--numstat` say "binary" for a file
-`--text` still shows as real content), so a "binary" verdict is only trusted once the file's actual
-HEAD content backs it up — a real NUL byte in its first 8KB. A "binary" verdict that the content
-doesn't support is INERT, not a silent exclusion: trusting it would reopen the exact empty-diff
-evasion the paragraph above closes. Every excluded file is named in the output — safe, because the
-path is from the public PR, never the corpus.
+as a reason to refuse the whole PR, and — this is the correction to an earlier round of this
+section — **not by a content-based exemption of any kind**. A file `--numstat` reports as binary is
+excluded from the added-line **cross-check only**; its `+` lines are turned into runs and shingled
+exactly like any other file's (`--text` already puts every added byte of every file into the patch
+as `+` lines). A round-3 version of this tool additionally trusted a numstat "binary" verdict only
+once the file's actual HEAD content backed it up (a NUL byte in its first 8KB), and went INERT
+otherwise — but that check's converse turned out to be the bug: a single NUL byte anywhere in an
+ordinary text file made numstat call it binary, the content check agreed, and the ENTIRE file
+became invisible to the search, exit 0. That is exactly the "one byte past the detector" pattern
+this tool exists to catch, not to have. So the exemption is removed outright, not tightened — a
+`.gitattributes -diff` marker trying the same trick on a real text file now simply fails to hide
+anything, because nothing about what gets scanned depends on numstat's opinion any more. Excluded
+files are still named in the output (safe: the path is from the public PR, never the corpus), now
+worded "excluded from the line-count cross-check" rather than "not scanned," because they are.
 
 **The benign list** (`.corpus-overlap-benign.yaml`, in the *consuming* repo, public) follows the
 same rule as §4b: each entry is `{shingle, reason, reviewed_by, date}` with a mandatory reason,
