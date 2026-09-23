@@ -981,7 +981,7 @@ describe("corpus-overlap.ts — G1: the control exercises the real diff-side pat
     // to empty also erases the control's own contribution — there is no
     // longer a separate "control path" this mutation can leave untouched.
     const mutatedTool = mutate(
-      "const allShingles = runsToShingles([...addedRuns, controlRun], shingleSize);",
+      "const allShingles = runsToShingles(combinedRuns, shingleSize);",
       "const allShingles = new Map<string, number>();",
     );
     const corpus = makeCorpus();
@@ -1020,6 +1020,62 @@ describe("corpus-overlap.ts — G1: the control exercises the real diff-side pat
     expect(r.exitCode).toBe(1);
     expect(r.output).toContain(PLANTED_PHRASE);
     expect(r.stdout).toContain("1 match(es)");
+  });
+
+  test("INJECTED: the control's spread is narrowed from [...addedRuns, controlRun] to [controlRun] → OBSERVED: INERT, exit 2 (round 4's wiring gap: sharing the array did NOT close this — the control's own shingle is still present either way, since it's appended after whatever the array holds)", () => {
+    // J3 (round 5): a round-4 review found that "sharing the array" does not
+    // by itself make the control sensitive to the array being narrowed to
+    // JUST the control's own contribution — the control's presence check
+    // still passes, because the control run is still there; only the REAL
+    // diff's runs are gone. Closed by an independent word-count re-check
+    // (see `plusWordCount` / `countWords` / `actualWordCount` in the source)
+    // that does not derive its expectation from the same (now-narrowed)
+    // array the mutation touched.
+    const mutatedTool = mutate(
+      "const combinedRuns = [...addedRuns, controlRun];",
+      "const combinedRuns = [controlRun];",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
+  });
+
+  test("INJECTED: the final report filter is replaced (rawMatches = matches.filter(() => false)) → OBSERVED: INERT, exit 2 (this is a REPORT-stage mutation the search control cannot see, by construction — matches already correctly found the real leak before this line ever ran)", () => {
+    // J3 (round 5): the control validates the SEARCH, not the REPORT — a
+    // mutation this far downstream, after `matches` already correctly
+    // contains the real leak, is outside anything a search-side control
+    // could ever be wired through. Closed by re-deriving, independently,
+    // how many entries the (unsabotaged) fromRealDiff predicate SHOULD have
+    // filtered out, and comparing that against how many actually were.
+    const mutatedTool = mutate(
+      "const rawMatches = matches.filter(fromRealDiff);",
+      "const rawMatches = matches.filter(() => false);",
+    );
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    commit(consumer, [write(consumer, "added.txt", `${PLANTED_PHRASE}\n`)], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const proc = Bun.spawnSync(["bun", mutatedTool, "--corpus", corpus, "--base", base, "--head", head], {
+      cwd: consumer,
+    });
+    const output = new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+
+    expect(proc.exitCode).toBe(2);
+    expect(output).toContain("INERT");
   });
 
   test("the UNMUTATED tool still passes cleanly on the same fixtures (sanity: the mutations above are real breakages, not false positives)", () => {
@@ -1291,6 +1347,156 @@ describe("corpus-overlap.ts — H2: deleting or moving a binary file never goes 
 });
 
 // -----------------------------------------------------------------------------
+// J1 (round 5): a clean exit-0 evasion. An added line whose own content is
+// "++ <text>" renders as "+++ <text>" — indistinguishable, by text alone,
+// from a genuine "+++ b/path" file header. Paired with a change that has a
+// --numstat row but no "+++ " line at all (an empty file, a mode-only
+// change), the phantom "header" the planted line creates balances the file
+// count, and the content was never scanned. Fixed by parsing the patch
+// structurally (diff --git sections, header region vs. hunk region) rather
+// than by what a line merely looks like — see extractAddedRuns.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — J1: a content line starting '++ ' can never act as a file header", () => {
+  test("INJECTED: a.bin (NUL on line 1, last line '++ ' + planted phrase) + an empty b.gitkeep → OBSERVED: exit 1, caught (previously: 0 shingles, exit 0)", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    writeFileSync(join(consumer, "a.bin"), `\x00\n++ ${PLANTED_PHRASE}\n`);
+    writeFileSync(join(consumer, "b.gitkeep"), "");
+    commit(consumer, ["a.bin", "b.gitkeep"], "evasion attempt 1");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: a.txt (single line '++ ' + planted phrase, no NUL) + .gitattributes 'a.txt -diff' + an empty b.gitkeep → OBSERVED: exit 1, caught (previously: exit 0)", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    write(consumer, "a.txt", `++ ${PLANTED_PHRASE}\n`);
+    write(consumer, ".gitattributes", "a.txt -diff\n");
+    writeFileSync(join(consumer, "b.gitkeep"), "");
+    commit(consumer, ["a.txt", ".gitattributes", "b.gitkeep"], "evasion attempt 2");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: the same a.bin, paired with a mode-only chmod +x on an existing file (instead of an empty file) → OBSERVED: exit 1, caught (previously: exit 0)", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    write(consumer, "script.sh", "#!/bin/sh\necho hi\n");
+    const base = commit(consumer, ["script.sh"], "base");
+    writeFileSync(join(consumer, "a.bin"), `\x00\n++ ${PLANTED_PHRASE}\n`);
+    Bun.spawnSync(["git", "add", "a.bin"], { cwd: consumer });
+    Bun.spawnSync(["chmod", "+x", join(consumer, "script.sh")]);
+    commit(consumer, ["a.bin", "script.sh"], "evasion attempt 3");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("a.bin ('++ ' + planted phrase) with NOTHING to balance the file count still catches the leak, not just goes INERT", () => {
+    // Before the structural-parse fix, this case already refused (INERT) —
+    // the phantom "file header" left the counts unbalanced, and the
+    // cross-check caught THAT, even though it never explained why. After the
+    // fix there is no phantom at all, so this should now scan cleanly to a
+    // real result instead of merely failing safe.
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    writeFileSync(join(consumer, "a.bin"), `\x00\n++ ${PLANTED_PHRASE}\n`);
+    commit(consumer, ["a.bin"], "evasion attempt, unbalanced");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// J2 (round 5): the structural parse's other side. An empty file, a mode-only
+// change, and a file↔symlink type change each have a --numstat row but no (or,
+// for a type change, an extra) "+++ " line — the round-4 "+++ "-counted
+// fileOrder went out of sync with --numstat's row count for exactly these
+// ordinary, harmless changes, and refused the whole PR (INERT) over it.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — J2: routine changes (.gitkeep, mode-only, type change) never go INERT", () => {
+  test("INJECTED: an empty .gitkeep, alongside a real text match → OBSERVED: exit 1 on the match, never INERT", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    writeFileSync(join(consumer, "empty.gitkeep"), "");
+    write(consumer, "notes.txt", `${PLANTED_PHRASE} continues.\n`);
+    commit(consumer, ["empty.gitkeep", "notes.txt"], "gitkeep + text");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).not.toContain("INERT");
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: a mode-only chmod +x, alongside a real text match → OBSERVED: exit 1 on the match, never INERT", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    write(consumer, "script.sh", "#!/bin/sh\n");
+    const base = commit(consumer, ["script.sh"], "base");
+    Bun.spawnSync(["chmod", "+x", join(consumer, "script.sh")]);
+    write(consumer, "notes.txt", `${PLANTED_PHRASE} continues.\n`);
+    commit(consumer, ["script.sh", "notes.txt"], "chmod + text");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).not.toContain("INERT");
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("INJECTED: a file→symlink type change (--no-renames still splits it into two 'diff --git' sections for one --numstat row), alongside a real text match → OBSERVED: exit 1 on the match, never INERT", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    write(consumer, "target.txt", "target content\n");
+    write(consumer, "link.txt", "regular file\n");
+    const base = commit(consumer, ["target.txt", "link.txt"], "base");
+    Bun.spawnSync(["rm", join(consumer, "link.txt")]);
+    Bun.spawnSync(["ln", "-s", "target.txt", join(consumer, "link.txt")]);
+    write(consumer, "notes.txt", `${PLANTED_PHRASE} continues.\n`);
+    Bun.spawnSync(["git", "add", "link.txt", "notes.txt"], { cwd: consumer });
+    commit(consumer, ["link.txt", "notes.txt"], "symlink + text");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).not.toContain("INERT");
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+});
+
+// -----------------------------------------------------------------------------
 // Small items (round 3): zero-width character stripping.
 // -----------------------------------------------------------------------------
 
@@ -1328,6 +1534,51 @@ describe("corpus-overlap.ts — zero-width characters are stripped during normal
 
     const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
     expect(r.exitCode).toBe(1);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Non-blocking (round 5): NUL maps to a SPACE, not the empty string. Stripping
+// it outright (as the zero-width characters are stripped) would let a PR
+// replace every space with a NUL to defeat the match by fusing words
+// together, the same way removing a space entirely would.
+// -----------------------------------------------------------------------------
+
+describe("corpus-overlap.ts — NUL is treated as a word separator, not stripped outright", () => {
+  test("INJECTED: the DIFF's added line has NUL bytes in place of spaces (word1\\0word2) → OBSERVED: exit 1, still caught — words stay separate, not fused into one token", () => {
+    const corpus = makeCorpus();
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    const words = PLANTED_PHRASE.split(" ");
+    const nulSeparated = words.join("\x00") + "\n";
+    writeFileSync(join(consumer, "added.txt"), nulSeparated);
+    commit(consumer, ["added.txt"], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", corpus, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain(PLANTED_PHRASE);
+  });
+
+  test("a NUL between two words does not fuse them into one token (mike\\0november stays two words, not 'mikenovember')", () => {
+    const dir = join(workDir, "corpus-nul-sep");
+    initRepo(dir);
+    write(dir, "notes.txt", "alpha bravo mike november charlie delta echo golf.\n");
+    commit(dir, ["notes.txt"], "seed");
+
+    const consumer = join(workDir, "consumer");
+    initRepo(consumer);
+    const base = commit(consumer, [write(consumer, "README.md", "hello\n")], "base");
+    // If NUL were stripped outright, "mike\0november" would collapse to the
+    // single token "mikenovember", and this 6-word shingle would never form.
+    writeFileSync(join(consumer, "added.txt"), "alpha bravo mike\x00november charlie delta echo golf.\n");
+    commit(consumer, ["added.txt"], "head");
+    const head = git(["rev-parse", "HEAD"], consumer);
+
+    const r = run(["--corpus", dir, "--base", base, "--head", head], consumer);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("alpha bravo mike november charlie delta");
   });
 });
 

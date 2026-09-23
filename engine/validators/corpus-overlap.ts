@@ -344,21 +344,35 @@ function decode(bytes: Uint8Array): string {
 
 /**
  * Every run of whitespace (space, tab, CR, LF, NBSP, ...) collapses to one
- * space, and a fixed set of non-whitespace characters is stripped outright
- * because leaving them in place would silently corrupt tokenisation:
+ * space. Two further, DIFFERENT corrections happen alongside that:
  *   - U+200B (zero-width space), U+200C/U+200D (joiners), U+FEFF (zero-width
- *     no-break space / BOM) — invisible, and `\s` does not treat them as
- *     whitespace, so left alone one sitting mid-word would split what a
- *     human reads as one word into two shingle tokens.
- *   - U+0000 (NUL) — round 4's H1 finding: a NUL glued directly onto a word
- *     (no surrounding real whitespace) is not whitespace either, so leaving
- *     it in place turned "\0The" into a token that will never equal "The" —
- *     a single byte silently defeating the match. Stripping it, the same as
- *     the zero-width characters, closes that without exempting the file
- *     that carries it from being scanned at all (see extractAddedRuns).
+ *     no-break space / BOM) are STRIPPED OUTRIGHT (replaced with nothing) —
+ *     invisible, and `\s` does not treat them as whitespace, so left alone
+ *     one sitting mid-word would split what a human reads as one word into
+ *     two shingle tokens.
+ *   - U+0000 (NUL) is TREATED AS WHITESPACE (replaced with a space, then
+ *     folded into the same collapse as real whitespace) — round 4's H1
+ *     finding was that leaving a NUL glued onto a word ("\0The") corrupted
+ *     the token into one that would never equal "The"; round 5's follow-up
+ *     is that NUL must not be stripped OUTRIGHT the way the zero-width
+ *     characters are, because a PR could then use it as a space substitute
+ *     to defeat the match on purpose ("mike\0november" stripped to nothing
+ *     becomes "mikenovember", ONE word, not two — exactly as hidden from a
+ *     6-word shingle window as if the space had never been removed at all).
+ *     Mapping it to a real separator instead keeps the words apart either
+ *     way. (This is a word-SHINGLE limit, not fixed by this mapping alone:
+ *     any OTHER non-whitespace separator a PR substitutes for a space — not
+ *     just NUL — has the same defeating effect and isn't stripped here,
+ *     because there is no fixed, safe set of "characters nobody's real text
+ *     ever uses as a separator" to add to. NUL costs nothing to fix and
+ *     closes the version of this that is hardest for a reviewer to see.)
  */
 function normalizeWhitespace(text: string): string {
-  return text.replace(/[\u0000​-‍﻿]/g, "").replace(/\s+/g, " ").trim();
+  return text
+    .replace(/\u0000/g, " ")
+    .replace(/[​-‍﻿]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** n-word windows out of already-normalised (single-space-separated) text. */
@@ -399,20 +413,50 @@ function runsToShingles(runs: string[], n: number): Map<string, number> {
 
 /**
  * Runs of added ('+') lines within one diff hunk, joined before normalising —
- * so a shingle split across two adjacent added lines is still caught. A run
- * breaks at a file boundary ("+++ ", "--- "), a hunk header ("@@"), a
- * "diff --git " line, or any other non-'+'/'-' line; '-' lines are skipped
- * without breaking a run, because with --unified=0 every hunk is one
- * contiguous old/new range, and its '+' lines are contiguous in the
- * resulting file regardless of how many '-' lines sit between them in the
- * diff's own old-then-new hunk body.
+ * so a shingle split across two adjacent added lines is still caught.
  *
- * The file-boundary checks require a trailing space ("+++ ", "--- "), not
- * just the three-character prefix: an ADDED line whose own content starts
- * with "++" (e.g. `++counter;`) renders as "+++counter;" — three literal
- * plus signs with no space after them — and must be read as added content,
- * not misread as a file header. Anchoring to the header's own fixed shape
- * (marker, then a space, then a path) tells the two apart.
+ * PARSED STRUCTURALLY, NOT BY LINE PREFIX (round 5, J1). A round-4 version of
+ * this function decided "is this line a file header" by checking whether the
+ * RAW LINE started with "+++ " or "--- ", wherever that line appeared. That
+ * is ambiguous: an ADDED line whose own content is `++ <text>` renders as
+ * `+++ <text>` — three literal plus signs, a space, then the text — which is
+ * byte-for-byte indistinguishable from a genuine "+++ b/path" header by text
+ * alone. A PR could exploit this: plant `++ <the phrase>` as an added line,
+ * pair it with a change that has a --numstat row but NO "+++ " line at all
+ * (an empty new file, a mode-only change) so the file-count cross-check
+ * still balances, and the planted line vanishes as a phantom "file header"
+ * instead of being scanned — silent, exit 0.
+ *
+ * The fix tracks where in the patch's OWN STRUCTURE we are, not what a line
+ * merely looks like:
+ *   - `diff --git ` ALWAYS starts a new section, exactly one per changed
+ *     path — the only line this function treats as a section boundary. This
+ *     line is unprefixed, synthesised by git, and never confusable with
+ *     added content (which always carries its own '+'/'-' prefix).
+ *   - Each section has a HEADER REGION, from `diff --git ` up to (but not
+ *     including) that section's own FIRST "@@ ...@@" hunk header. "+++ ",
+ *     "--- ", "index ", "old/new mode ", "similarity index ", "rename
+ *     from/to " — none of these can legitimately appear anywhere else, and
+ *     NOTHING in this region is ever turned into a run.
+ *   - Once a section's first "@@ " line is seen, header parsing for that
+ *     section is over for good — "+++ "/"--- " are simply never checked for
+ *     again until the NEXT `diff --git ` line. Inside a hunk, a line
+ *     starting with '+' is unconditionally content, whatever follows the
+ *     '+': there is no longer a competing interpretation for it to be
+ *     confused with. A later "@@ " line just starts the section's next hunk.
+ *   - Some changes have a --numstat row but NO hunk at all (an empty new
+ *     file, a mode-only change) — their section still gets exactly one
+ *     `fileOrder` entry, left at 0 (round 5, J2: these used to make
+ *     `fileOrder` shorter than `numstatRows`, going INERT on ordinary,
+ *     harmless changes).
+ *   - A file↔symlink type change is the opposite shape: it renders as TWO
+ *     consecutive sections for the SAME path (delete the old type, add the
+ *     new) but --numstat gives it only one row — see `lastSectionKey`,
+ *     which merges them back into a single `fileOrder` entry (also J2).
+ * '-' lines are skipped without breaking a run's contiguity: within one
+ * hunk, the lines removed from the old side don't survive into the new
+ * file, so they don't sit between the hunk's '+' lines in the result the
+ * corpus might contain a leak of.
  *
  * NOTHING is exempt from being turned into runs here — not a binary file,
  * not a file numstat calls binary, not a file with a NUL anywhere in it.
@@ -420,11 +464,14 @@ function runsToShingles(runs: string[], n: number): Map<string, number> {
  * this same '+'-line patch format, so every file's content is scanned the
  * same way (H1, round 4): a single NUL byte, or any other content shape,
  * cannot exempt a file from the search — there is no content-based check
- * here to evade. `fileOrder` (added-line count per file, IN FILE ORDER)
- * exists ONLY so the caller can subtract a numstat-binary-flagged file's
- * contribution back out of the numeric cross-check — never to decide what
- * gets scanned. See the comment on `fileOrder`'s declaration for why it is
- * positional rather than keyed by path.
+ * here to evade. `fileOrder` (added-line count per SECTION, in section
+ * order) exists ONLY so the caller can subtract a numstat-binary-flagged
+ * file's contribution back out of the numeric cross-check — never to decide
+ * what gets scanned. `plusWordCount` (round 5, J3) is a running, independent
+ * tally of the same content's word count, checked again by the caller right
+ * before it's used, so that a later mutation reassigning `addedRuns` (or the
+ * array built from it) to something smaller can be caught rather than
+ * silently trusted.
  */
 // `fileOrder` correlates with --numstat's rows by POSITION, not by path
 // string: git always quotes a path containing a tab, a newline, a literal
@@ -440,12 +487,29 @@ function runsToShingles(runs: string[], n: number): Map<string, number> {
 // order against a five-file mixed diff. A file whose path needed quoting is
 // still correctly excluded from the cross-check; it just cannot be spelled
 // out by name in the exclusion report as cleanly as an unquoted one can.
-function extractAddedRuns(diffText: string): { runs: string[]; plusLineCount: number; fileOrder: number[] } {
+function extractAddedRuns(
+  diffText: string,
+): { runs: string[]; plusLineCount: number; fileOrder: number[]; plusWordCount: number } {
   const runs: string[] = [];
   const fileOrder: number[] = [];
   let current: string[] = [];
   let plusLineCount = 0;
-  let inFile = false;
+  let plusWordCount = 0;
+  // "header": between this section's `diff --git ` line and its own first
+  // "@@ " line — metadata only. "hunk": past that point, where a '+' line is
+  // always content. Starts "header" defensively, in case the text somehow
+  // doesn't begin with a `diff --git ` line.
+  let mode: "header" | "hunk" = "header";
+  // A file↔symlink (or other) TYPE CHANGE renders as TWO consecutive
+  // sections for the SAME path — one deleting the old type, one adding the
+  // new — but --numstat gives it only ONE row. Their "diff --git a/X b/X"
+  // lines are textually identical (both quoted, or not, the same way, by the
+  // same git invocation — unlike matching against --numstat's own path
+  // spelling, this comparison never crosses that quoting boundary). Two
+  // consecutive sections sharing that exact line are merged into the same
+  // `fileOrder` entry instead of starting a new one, so the count stays
+  // correlated with --numstat's row count (round 5, J2).
+  let lastSectionKey: string | null = null;
   const flush = () => {
     if (current.length > 0) {
       runs.push(current.join(" "));
@@ -453,29 +517,52 @@ function extractAddedRuns(diffText: string): { runs: string[]; plusLineCount: nu
     }
   };
   for (const raw of diffText.split("\n")) {
-    if (raw.startsWith("+++ ")) {
+    if (raw.startsWith("diff --git ")) {
       flush();
-      fileOrder.push(0);
-      inFile = true;
+      if (raw !== lastSectionKey) fileOrder.push(0); // new logical file; a repeat of the same line merges into the prior entry
+      lastSectionKey = raw;
+      mode = "header";
       continue;
     }
-    if (raw.startsWith("--- ") || raw.startsWith("@@") || raw.startsWith("diff --git ")) {
-      flush();
+    if (mode === "header") {
+      if (raw.startsWith("@@ ")) {
+        mode = "hunk"; // header region for THIS section ends here, structurally — not by text shape
+        flush();
+        continue;
+      }
+      continue; // "+++ ", "--- ", "index ", mode/rename/similarity lines — never scanned
+    }
+    // mode === "hunk": a '+' line is unconditionally content from here on.
+    if (raw.startsWith("@@ ")) {
+      flush(); // this section's next hunk
       continue;
     }
     if (raw.startsWith("+")) {
-      current.push(raw.slice(1));
+      const content = raw.slice(1);
+      current.push(content);
       plusLineCount++;
-      if (inFile) fileOrder[fileOrder.length - 1]! += 1;
+      plusWordCount += normalizeWhitespace(content).split(" ").filter((w) => w.length > 0).length;
+      if (fileOrder.length > 0) fileOrder[fileOrder.length - 1]! += 1;
       continue;
     }
     if (raw.startsWith("-")) {
       continue; // does not break contiguity of the surrounding '+' run
     }
-    flush(); // context, "\ No newline at end of file", index lines, etc.
+    flush(); // "\ No newline at end of file", or any other non-content line
   }
   flush();
-  return { runs, plusLineCount, fileOrder };
+  return { runs, plusLineCount, fileOrder, plusWordCount };
+}
+
+/** Total word count across a list of runs, after the same normalisation `runsToShingles` applies. */
+function countWords(runs: string[]): number {
+  let total = 0;
+  for (const r of runs) {
+    const normalized = normalizeWhitespace(r);
+    if (normalized.length === 0) continue;
+    total += normalized.split(" ").length;
+  }
+  return total;
 }
 
 /**
@@ -833,7 +920,7 @@ const diff = run(["git", ...buildDiffArgs(["--unified=0"])], root);
 if (!diff.ok) {
   inert(`git diff failed — the diff could not be read.`);
 }
-const { runs: addedRuns, plusLineCount, fileOrder } = extractAddedRuns(decode(diff.stdout));
+const { runs: addedRuns, plusLineCount, fileOrder, plusWordCount } = extractAddedRuns(decode(diff.stdout));
 
 // The cross-check compares like with like: numstatAdded already excludes
 // binary-flagged rows (H1), so their contribution to plusLineCount (however
@@ -867,11 +954,16 @@ if (numstatAdded !== textOnlyPlusLineCount) {
 // the control draws a raw (pre-normalisation) fragment from the corpus and
 // injects it as one more element of `addedRuns` — not a parallel
 // computation, THE SAME array the real diff's shingles come from — before
-// the shared runsToShingles() and findMatches() calls run. A mutation that
-// empties the real diff's shingle set, or that breaks either shared
-// function, takes the control down with it, because by this point there is
-// no separate "control path" left to accidentally leave untouched. Never
-// printed; it is corpus content.
+// the shared runsToShingles() and findMatches() calls run. This closes a
+// mutation that breaks either shared function, or that breaks findMatches's
+// own lookup loop. It does NOT, on its own, close a mutation that empties or
+// replaces the ARRAY those functions are handed (round 5, J3 found two: the
+// spread narrowed to just the control run, and `addedRuns` reassigned to `[]`
+// right after extraction) — the control's own shingle is still present
+// either way, since it's appended after whatever the array already holds.
+// That gap is closed separately, immediately below, by an exact word-count
+// re-check against `plusWordCount`, captured inside extractAddedRuns before
+// any of this ran. Never printed; the control fragment is corpus content.
 // ---------------------------------------------------------------------------
 
 if (corpus.controlFragment === null) {
@@ -882,12 +974,30 @@ if (corpus.controlFragment === null) {
 }
 
 const controlRun = corpus.controlFragment;
+const controlWordCount = countWords([controlRun]);
+const combinedRuns = [...addedRuns, controlRun];
+
+// J3 (round 5): plusWordCount was computed AND RETURNED by extractAddedRuns,
+// before this line ever ran — reassigning `addedRuns`, or narrowing the
+// spread above, cannot retroactively change that already-captured number.
+// Comparing it against a fresh recount of `combinedRuns` here catches either
+// mutation: both leave `actualWordCount` short of what the patch actually
+// contained, which the control's own presence (unaffected either way, since
+// it's the LAST element appended) would not have noticed on its own.
+const actualWordCount = countWords(combinedRuns) - controlWordCount;
+if (actualWordCount !== plusWordCount) {
+  inert(
+    `the diff's shingle-source word count (${actualWordCount}) does not match the word count extracted from the ` +
+      `patch (${plusWordCount}) — refusing to trust a diff read that disagrees with itself.`,
+  );
+}
+
 // controlCounts is used only to tell provenance apart below (a bookkeeping
-// read, not the security decision); allShingles — built from addedRuns AND
-// controlRun in ONE call — is the shared, sabotage-sensitive source of truth
-// both the control's pass/fail AND the real search's matches come from.
+// read, not the security decision); allShingles — built from combinedRuns in
+// ONE call — is the shared, sabotage-sensitive source of truth both the
+// control's pass/fail AND the real search's matches come from.
 const controlCounts = runsToShingles([controlRun], shingleSize);
-const allShingles = runsToShingles([...addedRuns, controlRun], shingleSize);
+const allShingles = runsToShingles(combinedRuns, shingleSize);
 const matches = findMatches(allShingles.keys(), corpusHas);
 
 if (![...controlCounts.keys()].some((s) => matches.includes(s))) {
@@ -911,6 +1021,22 @@ function fromRealDiff(shingle: string): boolean {
 }
 
 const rawMatches = matches.filter(fromRealDiff);
+
+// J3 (round 5): the control validates the SEARCH (does the corpus's index
+// find a known-present shingle) but never ran anywhere near this filter — a
+// mutation reducing `rawMatches` further than fromRealDiff, unsabotaged,
+// would ever justify (e.g. `matches.filter(() => false)`) passes the control
+// and still prints a false "clean." Re-deriving how many entries SHOULD have
+// been filtered out, from the same (unsabotaged) fromRealDiff, and comparing
+// it against how many actually were, catches that at the report itself.
+const explainableFilteredOut = matches.filter((s) => !fromRealDiff(s)).length;
+const actualFilteredOut = matches.length - rawMatches.length;
+if (actualFilteredOut !== explainableFilteredOut) {
+  inert(
+    "the reported match count does not match what the report's own filtering logic should have produced — " +
+      "refusing to trust a result that disagrees with itself.",
+  );
+}
 
 // ---------------------------------------------------------------------------
 // The benign list — loaded from --base, never --head. A malformed file at

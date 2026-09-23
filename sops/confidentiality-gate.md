@@ -223,14 +223,25 @@ of the SAME array the real diff's added lines come from, before the one shared c
 that array into shingles and the one shared function (`findMatches`) that both the control and the
 real search use to look them up — not a parallel computation of its own, and not a check that the
 corpus's own shingle set is merely non-empty, which can never fail once the corpus has been read at
-all and proves nothing about whether the diff side would actually find something real. (An earlier
-round of this design routed the control through the same *functions* as the real search without
-sharing the same *data* — a review found that a mutation disabling the search loop, or hardcoding
-the real diff's shingle set to empty, still passed the control and printed a false "clean." Sharing
-the array closes that.) If the control's own shingle produces no match, the run is INERT: the
-observable symptom of a broken lookup, a normalisation step that silently stopped running, or the
-corpus and diff sides drifting out of sync — not "the corpus is empty," which is a narrower and
-weaker claim.
+all and proves nothing about whether the diff side would actually find something real. If the
+control's own shingle produces no match, the run is INERT: the observable symptom of a broken
+lookup, a normalisation step that silently stopped running, or the corpus and diff sides drifting
+out of sync — not "the corpus is empty," which is a narrower and weaker claim.
+
+Sharing that array closes a mutation that disables `findMatches`'s own lookup loop, or that breaks
+either shared function — but NOT, on its own, a mutation that narrows or replaces the array itself
+(a review found two: the spread narrowed from `[...addedRuns, controlRun]` to `[controlRun]`, and
+`addedRuns` reassigned to `[]` right after extraction). Either way the control's own shingle is
+still present — it's appended after whatever the array already holds — so the control alone cannot
+notice the real diff's contribution is gone. That gap is closed separately: `extractAddedRuns`
+returns an exact word count for what it extracted, captured before any of the above could run, and
+a fresh recount of the array actually used for shingling is compared against it immediately before
+that array is used — any shortfall is INERT. A third mutation the same review found sits past even
+that: replacing the final report's own filter (`rawMatches = matches.filter(() => false)`) discards
+a real match `matches` already correctly held, entirely outside anything a search-side control could
+ever see. That is closed the same way, one stage later — independently re-deriving how many entries
+the report's own (unsabotaged) filtering logic should have dropped, and refusing to trust the report
+if the actual count disagrees.
 
 The diff read is hardened against the PR under scan controlling its own visibility: `git diff` runs
 with `--no-ext-diff --no-textconv --text --no-renames`, so a `.gitattributes` `-diff` marker or a
@@ -239,6 +250,20 @@ is a delete (old path) plus an add (new path), each scanned independently — an
 reshuffle in a consuming repo must not need special handling. `--base` and `--head` are verified
 with `git rev-parse --verify --end-of-options` and refused outright if either looks like a flag
 (e.g. `--base=--output=<file>`) — a ref is data, never an option to the git commands it's passed to.
+
+**The patch is parsed structurally, not by what a line looks like.** A round-4 version of this tool
+decided "is this a file header" by checking whether a raw line started with `"+++ "`, wherever it
+appeared — ambiguous, because an ADDED line whose own content is `++ <text>` renders as `+++ <text>`,
+indistinguishable by text alone from a genuine header. Paired with a change that has a `--numstat`
+row but no `"+++ "` line at all (an empty new file, a mode-only change), that ambiguity let a PR
+plant such a line, have it misread as a phantom file boundary, and have the file-count cross-check
+still balance — the content was never scanned, exit 0. The fix reads the patch's own structure
+instead: a section starts at `diff --git`; `"--- "`/`"+++ "` are headers only in that section's own
+header region, before its first `"@@ "` hunk line; once a hunk has started, a line beginning `+` is
+unconditionally content, whatever follows it. The same structural read also fixed the reverse
+problem: an empty file, a mode-only change, or a file↔symlink type change either has no `"+++ "`
+line at all, or (a type change) renders as two `diff --git` sections for one `--numstat` row —
+both used to desynchronise the file-count cross-check and refuse an entirely routine change, INERT.
 
 **Binary files in the diff** (not the corpus — see Scope above for that) are handled, not treated
 as a reason to refuse the whole PR, and — this is the correction to an earlier round of this
