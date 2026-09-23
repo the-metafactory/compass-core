@@ -250,3 +250,5 @@ compass-core follows semver. The `arc-manifest.yaml` is the source of truth for 
 ## License
 
 MIT — see `LICENSE`.
+
+<!-- scratch #65 case (a): unrelated README edit, do not merge -->
