@@ -1,0 +1,8 @@
+# scratch fixture for compass-core#75 post-merge verification; never merged
+name: scratch-75
+on: workflow_dispatch
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"
