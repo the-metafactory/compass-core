@@ -25,14 +25,26 @@ name: verify
 
 on:
   pull_request:
-  # Runs on the working branch too, so the wiring can be verified — and a
-  # fault-injected red observed — before a PR exists.
+  # main only (issue #78). A feature-branch push used to trigger `verify`
+  # too, keyed to the same HEAD SHA as the pull_request run below —
+  # concurrency then cancelled whichever ran second, but the cancelled run
+  # kept the name `verify`, and classic branch protection reads THAT one:
+  # "Required status check \"verify\" is cancelled" on a PR whose actual
+  # verify run was green. It also burned a full duplicate run's minutes on
+  # every push. Restricting push to main removes both — a PR head is
+  # verified once, by pull_request; main gets its own run on every merge,
+  # never superseded (see cancel-in-progress below); a feature branch gets
+  # no push run at all, only the pull_request one once a PR exists.
   push:
-    branches: [main, "feat/**", "fix/**"]
+    branches: [main]
 
-# Keyed on the HEAD SHA so the push run and the pull_request run for one commit
-# collapse into a single run. cancel-in-progress is off for main: main's run is
-# the record of whether the merged state passes, and is never superseded.
+# Keyed on the HEAD SHA. With push now restricted to main, a push run and a
+# pull_request run never share a SHA — a PR head's SHA is verified by
+# pull_request only, and main's post-merge SHA (the merge commit) is
+# verified by push only — so this group no longer collapses two runs of the
+# same commit into one; it only dedupes reruns of the same event for the
+# same SHA. cancel-in-progress stays off for main: main's run is the record
+# of whether the merged state passes, and must never be superseded.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
