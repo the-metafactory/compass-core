@@ -63,6 +63,20 @@
  * or end with whitespace; trimming would silently corrupt it and, worse,
  * could make two distinct paths collide).
  *
+ * computeChangedPaths reads git's stdout as a `Buffer`, not a UTF-8 string
+ * (issue #67, J2): `spawnSync(..., { encoding: "utf8" })` would decode the
+ * whole stream through Node's UTF-8 decoder first, and an invalid byte
+ * sequence in a filename (a filesystem path is an arbitrary byte string on
+ * POSIX, under no obligation to be valid UTF-8) becomes U+FFFD — lossy, and
+ * not reversible back to the original bytes. Splitting the Buffer on the
+ * literal NUL byte (0x00; never ambiguous, since NUL cannot appear inside a
+ * valid or invalid UTF-8 byte sequence git would emit here) and decoding
+ * each segment with `"latin1"` instead maps every byte 0..255 to the same
+ * code unit, so the resulting string round-trips byte-exact via
+ * `Buffer.from(s, "latin1")`. This can't change what matches: every
+ * PIN_SENSITIVE_PATHS entry and the PIN_SENSITIVE_PREFIXES entry are plain
+ * ASCII, and `"latin1"` and `"utf8"` decode ASCII bytes identically.
+ *
  * ## Why this is pure-function-first
  *
  * evaluatePinChange takes the already-computed list of changed paths, not a
@@ -191,14 +205,28 @@ export function computeChangedPaths(baseSha: string, headSha: string, cwd: strin
   const proc = spawnSync(
     "git",
     ["diff", "--no-renames", "--name-only", "-z", `${baseSha}...${headSha}`],
-    { cwd, encoding: "utf8" },
+    { cwd },
   );
   if (proc.status !== 0) {
     throw new Error(
-      `git diff --no-renames --name-only -z ${baseSha}...${headSha} failed (exit ${proc.status}): ${proc.stderr}`,
+      `git diff --no-renames --name-only -z ${baseSha}...${headSha} failed (exit ${proc.status}): ${proc.stderr?.toString("utf8")}`,
     );
   }
-  return proc.stdout.split("\0").filter((l) => l.length > 0);
+  // proc.stdout is a Buffer here (no `encoding` option passed) — split on
+  // the raw NUL byte, and decode each segment with "latin1" so every byte
+  // round-trips exactly. See the file header (J2) for why "utf8" here would
+  // be lossy.
+  const stdout = proc.stdout as Buffer;
+  const paths: string[] = [];
+  let start = 0;
+  for (let i = 0; i < stdout.length; i++) {
+    if (stdout[i] === 0x00) {
+      if (i > start) paths.push(stdout.subarray(start, i).toString("latin1"));
+      start = i + 1;
+    }
+  }
+  if (start < stdout.length) paths.push(stdout.subarray(start).toString("latin1"));
+  return paths;
 }
 
 function main(): void {
