@@ -576,16 +576,38 @@ describe("install.ts — --with-ci", () => {
  *
  * compass-pin-check.yml carries no pin and no other placeholder, so it must
  * come through byte-identical to its template. compass-governance.yml must
- * match its template apart from the one substituted pin — asserted by
- * capturing the ACTUAL rendered pin and substituting it back into the
- * template, rather than hard-coding ENGINE_REF, so this stays correct across
- * a pin bump.
+ * match its template apart from the one substituted pin.
  *
- * PR #66 (open, fixing #55) also touches templates/workflows/
+ * F1 (round-1 review): the expected pin must NOT come from the rendered
+ * output under test — reading the pin back out of `installed` and feeding it
+ * back into the comparison is circular, and a reviewer proved it: setting
+ * `TEMPLATE_VALUES.compass_core_ref` to a wrong SHA while leaving `ENGINE_REF`
+ * untouched left every test here green. The expected pin is now read
+ * independently, straight out of engine/install.ts's source text, with the
+ * same `/^const ENGINE_REF = "([^"]*)";$/m` regex engine-ref.test.ts uses
+ * (that function isn't exported there, so it is reproduced here rather than
+ * reached into) — a source neither `renderText` nor `renderTemplateValues`
+ * touches.
+ *
+ * #66 (merged, fixing #55) also touches templates/workflows/
  * compass-pin-check.yml (a `-z`/NUL-delimited read fix to the same file this
  * test compares against). This test reads whatever that template currently
- * is, so it holds regardless of which of #66 or this fix merges first.
+ * is, so it held regardless of which of #66 or this fix merged first.
  */
+
+/**
+ * Reads ENGINE_REF straight from engine/install.ts's source, independent of
+ * anything install.ts renders. Same extraction as engine/__tests__/
+ * engine-ref.test.ts's (unexported) `readEngineRef` — reproduced rather than
+ * imported, since that helper isn't exported — so the expected pin in the
+ * tests below can never be sourced from the render path under test (F1).
+ */
+function readEngineRefFromSource(): string {
+  const source = readFileSync(INSTALLER, "utf8");
+  const match = source.match(/^const ENGINE_REF = "([^"]*)";$/m);
+  if (!match) throw new Error(`no 'const ENGINE_REF = "..."' line in ${INSTALLER}`);
+  return match[1];
+}
 describe("install.ts — --with-ci renders both workflow templates (#56)", () => {
   const WORKFLOW = join(".github", "workflows", "compass-governance.yml");
   const PIN_CHECK = join(".github", "workflows", "compass-pin-check.yml");
@@ -617,12 +639,15 @@ describe("install.ts — --with-ci renders both workflow templates (#56)", () =>
     );
     const installed = readFileSync(join(dir, WORKFLOW), "utf8");
 
+    // Expected pin from install.ts's source, NOT from `installed` (F1: the
+    // rendered output under test must never supply its own expectation).
+    const engineRef = readEngineRefFromSource();
+
     const pinMatch = installed.match(/ref: ([0-9a-f]{40})\b/);
     expect(pinMatch).not.toBeNull();
-    const expected = template.replace(
-      "{{template:compass_core_ref}}",
-      pinMatch![1],
-    );
+    expect(pinMatch![1]).toBe(engineRef);
+
+    const expected = template.replace("{{template:compass_core_ref}}", engineRef);
     expect(installed).toBe(expected);
   });
 
