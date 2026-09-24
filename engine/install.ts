@@ -152,7 +152,7 @@ const SOURCE_PIN_CHECK_WORKFLOW = join(
  * workflow file and read what changed, which is the upgrade path the workflow
  * header describes.
  */
-const ENGINE_REF = "a73c053bfb19cdbe06fd3f0c7a35204dfaa81cf2";
+const ENGINE_REF = "4ed3725bf1f0c3ee5af5ecbb67e773ac45827990";
 
 /** Substituted into the workflow template at install time. */
 const TEMPLATE_VALUES: Record<string, string> = {
