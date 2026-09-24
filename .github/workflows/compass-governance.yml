@@ -235,7 +235,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: the-metafactory/compass-core
-          ref: a73c053bfb19cdbe06fd3f0c7a35204dfaa81cf2 # compass-core pin, rendered at install time
+          ref: 4ed3725bf1f0c3ee5af5ecbb67e773ac45827990 # compass-core pin, rendered at install time
           path: .compass-engine
           persist-credentials: false
 
