@@ -438,6 +438,16 @@ const FIXTURES: Fixture[] = [
     },
     expectBlockedUnlabelled: false,
   },
+  // --- J1 (issue #67): notice-injection-shaped filename still blocks --------
+  // The embedded newline+::stop-commands:: only forges the SHELL LOG (see
+  // pin-check-notice-sanitise.test.ts); it changes nothing about whether
+  // this path is watched, so shell and TS must still agree it blocks.
+  {
+    label: "J1: new file with an embedded newline shaped like a workflow-command injection",
+    setupBase: () => {},
+    setupHead: (d) => writeAt(d, ".github/workflows/evil\n::stop-commands::x.yml"),
+    expectBlockedUnlabelled: true,
+  },
 ];
 
 describe("shell vs TS agreement on the fix (#55) — every fixture, old and new", () => {

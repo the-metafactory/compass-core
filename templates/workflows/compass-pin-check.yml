@@ -148,7 +148,14 @@ jobs:
           while IFS= read -r -d '' p; do
             case "$p" in
               .github/workflows/*|templates/workflows/compass-governance.yml|templates/workflows/compass-pin-check.yml|engine/install.ts)
-                echo "::notice::pin-sensitive path changed: $p"
+                # $p is PR-controlled (a path from the PR's own diff) — strip
+                # any newline/carriage-return before it reaches a workflow
+                # command, so a filename crafted to contain one can't inject
+                # a fake `::error::`/`::stop-commands::` line into this log
+                # (issue #67, J1; same idiom as compass-governance.yml's
+                # own `safe_f`).
+                safe_p=$(printf '%s' "$p" | tr -d '\n\r')
+                echo "::notice::pin-sensitive path changed: $safe_p"
                 CHANGED=1
                 ;;
             esac
