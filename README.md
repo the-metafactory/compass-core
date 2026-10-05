@@ -17,6 +17,7 @@ Six governance surfaces, all wired to one config:
 | **Validators** | `engine/validators/` | CLAUDE.md sections, GitHub label hygiene, and a leak/credential scanner |
 | **CI gates** | `.githooks/`, `templates/workflows/` | Pre-commit hook + PR governance and pin-bump workflows, installed with `--with-ci` |
 | **SOPs** | `sops/` | Twelve generic SOPs (dev-pipeline, versioning, worktree, design-process, retrospective, new-repo-pattern, pr-review, brainstorming-and-review, autonomous-work, in-session-dev-loop, plan-breakdown, confidentiality-gate) |
+| **Skills** | `claude/skills/` | `governance` ships here. `plan-breakdown` (the front-end of `sops/plan-breakdown.md`) is its own bundle, [metafactory-skill-plan-breakdown](https://github.com/the-metafactory/metafactory-skill-plan-breakdown), declared as a dependency |
 
 ## Install
 

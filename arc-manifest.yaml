@@ -36,8 +36,8 @@
 #     `{ trigger }[]`, read only by `arc info`'s printer — never by the
 #     linker. Both are gone rather than reshaped: a declaration whose only
 #     effect is to make a reader believe an install happened is worse than
-#     silence. claude/skills/governance, claude/skills/plan-breakdown and
-#     claude/agents/governance.md now reach ~/.claude through `provides.files`
+#     silence. claude/skills/governance and claude/agents/governance.md
+#     now reach ~/.claude through `provides.files`
 #     below — a key arc DOES honor,
 #     for every package type (arc v0.45.0: src/lib/artifact-installer.ts:324,
 #     the type-agnostic provides.files pass, arc#84) — an install-time
@@ -72,13 +72,13 @@ name: "@the-metafactory/compass-core"
 # attached, and it belongs to a release, not to a defect fix whose subject is
 # clobbering. Left loud, and left failing validation on purpose, rather than
 # changed quietly here.
-version: 0.6.2
+version: 0.7.0
 type: governance
 tier: official
 description: >-
   Reusable governance engine for Claude Code projects — SOPs, validators,
-  governance + plan-breakdown skills, governance subagent, CLAUDE.md
-  template. arc install fetches the package; install it into a repo with
+  governance skill (plan-breakdown skill via its own bundle, a dependency),
+  governance subagent, CLAUDE.md template. arc install fetches the package; install it into a repo with
   `bun <store-path>/engine/install.ts <your-repo> [--with-ci]`.
 author:
   name: the-metafactory
@@ -88,16 +88,23 @@ license: MIT
 
 # Install-time drops (arc#361): arc symlinks each source to its target via the
 # type-agnostic provides.files pass, honored for every package type since
-# v0.45.0 (arc: src/lib/artifact-installer.ts:324, arc#84). These three entries
-# are the ONLY things arc installs from this package.
+# v0.45.0 (arc: src/lib/artifact-installer.ts:324, arc#84). These two entries
+# are the ONLY things arc installs from this package itself; the plan-breakdown
+# skill comes from its own bundle (see dependencies below).
 provides:
   files:
     - source: claude/skills/governance
       target: ~/.claude/skills/Governance
-    - source: claude/skills/plan-breakdown
-      target: ~/.claude/skills/plan-breakdown
     - source: claude/agents/governance.md
       target: ~/.claude/agents/governance.md
+
+# The plan-breakdown skill (the front-end of sops/plan-breakdown.md) lives in
+# its own bundle, the-metafactory/metafactory-skill-plan-breakdown, which is its
+# single source. compass-core keeps the SOP and depends on the skill instead of
+# shipping a second copy that drifts.
+dependencies:
+  - name: "plan-breakdown"
+    version: ">=0.2.0"
 
 # All four sub-blocks are declared, empties included: arc requires the block in
 # full so that risk is never silently defaulted to "low" (arc: src/lib/validate-
